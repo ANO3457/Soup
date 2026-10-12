@@ -157,7 +157,10 @@ class TestExportPrintsIt:
         result = CliRunner().invoke(app, ["export", "--help"])
 
         assert result.exit_code == 0, (result.output, repr(result.exception))
-        assert "awq and gptq are deprecated" in _plain(result.output)
+        output = _plain(result.output)
+        assert "awq and gptq are deprecated" in output
+        # The release the help promises is the one the warnings promise.
+        assert f"removed in Soup v{DEPRECATED_VALUE_REJECTION_VERSION}" in output, output
 
 
 class TestQuantizePrintsIt:
@@ -189,4 +192,6 @@ class TestQuantizePrintsIt:
         result = CliRunner().invoke(app, ["quantize", "--help"])
 
         assert result.exit_code == 0, (result.output, repr(result.exception))
-        assert "awq and gptq are deprecated" in _plain(result.output)
+        output = _plain(result.output)
+        assert "awq and gptq are deprecated" in output
+        assert f"removed in Soup v{DEPRECATED_VALUE_REJECTION_VERSION}" in output, output

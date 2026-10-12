@@ -99,7 +99,7 @@ that will refuse them. A config that loaded before can stop loading: run
   `training.use_longlora`, `training.ebft_variant`, `training.gdpo_variant`,
   `training.rope_scaling_type` where no setup reads it, `freeze_layers` / `freeze_ratio`
   outside the text `sft` / `tts` path on the transformers backend, `auto_mixed_precision`
-  outside `sft` / `tts`, and `backend: unsloth` on the seven tasks that have no unsloth
+  outside `sft` / `tts`, and `backend: unsloth` on seven further tasks that have no unsloth
   setup. Each message names the field and what to change. `lr_groups`, `early_stop_patience`,
   `forgetting_eval_steps` and other unread knobs warn at load now and are refused from v0.77.
 - **Validation loss is now evaluated.** `data.val_split` held rows out of training on every
@@ -115,20 +115,22 @@ that will refuse them. A config that loaded before can stop loading: run
 - **Layer streaming reads its disk tier on a background thread, through direct I/O, and can
   stripe it across NVMe drives.** On a 36 GB 70B-shaped NF4 store larger than RAM (one RTX 5070
   Laptop 8 GB box), a cold step went from 110.5 s on the synchronous read to 16.2-17.3 s, and
-  from 17.4 s to 9.97 s across two drives with `SOUP_LAYER_STREAM_STRIPE_DIRS` (1.28-1.41x when
-  both drives throttle under sustained load). A store that fits RAM is still faster on the RAM
-  tier, which `stream_source: auto` picks. Opt-in (`stream_layers: true`) and still BETA;
-  records: [direct I/O](benchmarks/gate-974-disk-tier-direct-io.md),
+  from 17.4 s to 9.97 s across two drives with `SOUP_LAYER_STREAM_STRIPE_DIRS` (a sustained-load
+  probe: two rounds, 1.28x and 1.41x, no formal verdict;
+  [record](benchmarks/probe-rtx5070-two-drive-sustained.md)). A store that fits RAM is still
+  faster on the RAM tier, which `stream_source: auto` picks. Opt-in (`stream_layers: true`) and
+  still BETA; records: [direct I/O](benchmarks/gate-974-disk-tier-direct-io.md),
   [striping](benchmarks/gate-two-drive-striping.md).
 - **New commands and options.** `soup adapters check` scans a LoRA adapter for silent failure;
   `soup bench train` trains a fixed number of steps and exits 1 when the model was not training
-  (`soup bench` is now a group, and `soup bench infer` is the old inference benchmark);
+  (it covers `task: sft` on the transformers backend; `soup bench` is now a group, and
+  `soup bench infer` is the old inference benchmark);
   `soup data clean` sanitizes and repairs a dataset without touching the input file;
   `soup recipes verify` checks on the meta device, with no weights downloaded, that every shipped
   recipe can attach a LoRA adapter; `soup rewind` names the dataset rows behind a loss spike.
   `soup infer` gains opt-in `--batch-size` and an experimental `--cuda-graphs` (PyTorch 2.14 or
-  newer; on one RTX 5070 Laptop the slowest run with it decoded 2.9x faster than the fastest
-  without). `soup ab` runs a two-sided, variance-robust test, and
+  newer; on one RTX 5070 Laptop, unpinned, Qwen2.5-1.5B in FP16, the slowest run with it decoded
+  2.9x faster than the fastest without). `soup ab` runs a two-sided, variance-robust test, and
   `soup adapters sign --backend sigstore` and `soup attest emit --sign sigstore` sign with
   Sigstore keyless OIDC (`pip install "soup-cli[sigstore]"`).
 - **Deprecated:** `soup export --format awq` and `--format gptq` will be removed in v0.77; both
