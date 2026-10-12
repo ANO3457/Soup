@@ -22,6 +22,7 @@ from soup_cli.commands.export import (
     SUPPORTED_FORMATS,
     deprecated_format_notice,
 )
+from soup_cli.config.deprecation import DEPRECATED_VALUE_REJECTION_VERSION
 
 # Rich colours per character on a colour-capable runner and wraps at the
 # terminal width, drawing box borders between the fragments of a wrapped help
@@ -60,7 +61,7 @@ class TestTheNotice:
         notice = deprecated_format_notice(fmt)
         assert notice is not None
         assert f"--format {fmt} is deprecated" in notice
-        assert "will be removed in the next release" in notice
+        assert f"will be removed in Soup v{DEPRECATED_VALUE_REJECTION_VERSION}:" in notice
         for replacement in REPLACEMENTS:
             assert re.search(rf"\b{re.escape(replacement)}\b", notice), (replacement, notice)
 

@@ -723,7 +723,7 @@ soup quantize ./out --to gguf --bits 4
 soup quantize ./out --to onnx -o ./out-onnx
 ```
 
-Prints the equivalent `soup export …` invocation (escaped via `shlex.quote`) for copy-paste. Intentionally does NOT in-process call `soup export` — Typer commands aren't safe to re-enter. `--to awq` and `--to gptq` still print their command, followed by a notice that the two formats are deprecated and will be removed in the next release.
+Prints the equivalent `soup export …` invocation (escaped via `shlex.quote`) for copy-paste. Intentionally does NOT in-process call `soup export` — Typer commands aren't safe to re-enter. `--to awq` and `--to gptq` still print their command, followed by a notice that the two formats are deprecated and will be removed in Soup v0.77.
 
 
 ## Llama.cpp Proxy

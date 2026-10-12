@@ -78,10 +78,13 @@ class TestTheDeadline:
             rf'"{re.escape(DEPRECATED_VALUE_REJECTION_VERSION)}"'
             rf"|v{re.escape(DEPRECATED_VALUE_REJECTION_VERSION)}\b"
         )
+        # staged_fields.py declares its own deadline (#808), which is allowed to name
+        # the same release; it is the one file exempt from this scan.
         holders = sorted(
             path.relative_to(ROOT).as_posix()
             for path in (ROOT / "src").rglob("*.py")
-            if needle.search(path.read_text(encoding="utf-8"))
+            if path.name != "staged_fields.py"
+            and needle.search(path.read_text(encoding="utf-8"))
         )
         assert holders == ["src/soup_cli/config/deprecation.py"], holders
 
