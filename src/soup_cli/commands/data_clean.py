@@ -18,7 +18,6 @@ from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -26,6 +25,7 @@ from soup_cli.data.formats import detect_format
 from soup_cli.data.loader import load_raw_data
 from soup_cli.utils.data_clean import CleanReport, clean_dataset
 from soup_cli.utils.paths import atomic_write_text, is_under_cwd
+from soup_cli.utils.terminal import for_terminal
 
 console = Console()
 
@@ -40,7 +40,7 @@ def _render_summary_table(report: CleanReport) -> None:
         table.add_row("[green]No issues found[/]", "0")
     else:
         for rule_name, count in sorted(report.rule_counts.items(), key=lambda x: -x[1]):
-            table.add_row(escape(rule_name), f"[cyan]{count}[/]")
+            table.add_row(for_terminal(rule_name), f"[cyan]{count}[/]")
 
     console.print(table)
 
@@ -122,7 +122,7 @@ def clean(
     try:
         data = load_raw_data(file_path)
     except Exception as exc:
-        console.print(f"[red]Failed to load dataset:[/] {escape(str(exc))}")
+        console.print(f"[red]Failed to load dataset:[/] {for_terminal(str(exc))}")
         raise typer.Exit(1) from exc
 
     if not data:
@@ -183,7 +183,7 @@ def clean(
             content = "\n".join(jsonl_lines) + ("\n" if jsonl_lines else "")
             atomic_write_text(content, str(output_path))
         except Exception as exc:
-            console.print(f"[red]Failed to write output file:[/] {escape(str(exc))}")
+            console.print(f"[red]Failed to write output file:[/] {for_terminal(str(exc))}")
             raise typer.Exit(1) from exc
 
     if json_output:
