@@ -1260,9 +1260,12 @@ class TrainingConfig(BaseModel):
     optimizer: str = Field(
         default="adamw_torch",
         description=(
-            "Optimizer name. v0.41.0 expands the allowlist to cover BAdam, "
-            "APOLLO, Adam-mini, lomo/adalomo, grokadamw, schedule_free, "
-            "muon/dion/came_pytorch, and TorchAO ao_adamw_{fp8,4bit,8bit}. "
+            "Optimizer name (v0.41.0 expanded the allowlist: HF-native, "
+            "bnb-8bit, lomo/adalomo, apollo_adamw, grokadamw, "
+            "schedule_free). Note: ten names transformers 5.x rejects in "
+            "TrainingArguments (e.g. badam, adam_mini, muon, dion, "
+            "came_pytorch, ao_adamw_{fp8,4bit,8bit}) are refused at config "
+            "load (#1269); adamw_hf and muon still work on backend: mlx. "
             "See soup_cli.utils.optimizer_zoo.SUPPORTED_OPTIMIZERS for the "
             "full list."
         ),
@@ -3036,7 +3039,10 @@ class TrainingConfig(BaseModel):
         default=None,
         description=(
             "RoPE scaling method for long-context: linear, dynamic, yarn or llama3 "
-            "(v0.49.0). 'longrope' is refused at config load (#1239)."
+            "(v0.49.0). 'longrope' is refused at config load (#1239). Applied by "
+            "task sft, tts and pretrain on backend: transformers (sft: the text "
+            "path without layer streaming); refused at config load anywhere else "
+            "(#1697)."
         ),
     )
     # v0.49.0 Part A — YaRN-specific tunables (only meaningful when
@@ -4252,7 +4258,6 @@ class TrainingConfig(BaseModel):
         if self.use_lorafa and self.optimizer is not None and self.optimizer not in (
             "adamw_torch",
             "adamw",
-            "adamw_hf",
             "adamw_torch_fused",
         ):
             raise ValueError(
@@ -4822,6 +4827,13 @@ UNSLOTH_SETUP_TASKS: frozenset[str] = frozenset({
 #: layer streaming reaches that method; the other paths are refused too (#1581).
 FREEZE_APPLYING_TASKS: frozenset[str] = frozenset({"sft", "tts"})
 
+#: #1697 — the tasks whose trainer reads ``training.rope_scaling_type``:
+#: ``SFTTrainerWrapper._setup_transformers`` (inherited by ``tts``) and
+#: ``PretrainTrainerWrapper._setup_transformers``. Every other trainer builds
+#: the model with the checkpoint's own RoPE, so the field is refused there, and
+#: within these tasks on every path that does not reach those two methods.
+ROPE_SCALING_APPLYING_TASKS: frozenset[str] = frozenset({"sft", "tts", "pretrain"})
+
 #: The bitsandbytes values: ``4bit`` was the default, so every config Soup dumped
 #: for these tasks carries one of them literally (#795 review).
 _BNB_QUANTIZATION_VALUES = frozenset({"4bit", "8bit"})
@@ -5354,6 +5366,32 @@ class SoupConfig(BaseModel):
         return remap_root_level_misplaced_keys(values)
 
     @model_validator(mode="after")
+    def _validate_mlx_only_optimizers(self) -> "SoupConfig":
+        """#1283 — `adamw_hf` and `muon` only build on ``backend: mlx``.
+
+        transformers 5.x rejects both names in TrainingArguments
+        (OptimizerNames), so a transformers/unsloth run would pass config
+        load and crash inside the trainer after the model had loaded
+        (#1269). The MLX backend never builds TrainingArguments — it has
+        its own optimizer map (trainer/mlx_optim.py) with entries for both
+        — so MLX keeps them and every other backend refuses them here.
+        """
+        from soup_cli.utils.optimizer_zoo import MLX_ONLY_OPTIMIZERS
+
+        if self.backend == "mlx":
+            return self
+        opt = getattr(self.training, "optimizer", None)
+        if opt is not None and opt in MLX_ONLY_OPTIMIZERS:
+            raise ValueError(
+                f"training.optimizer={opt!r} only works on backend: mlx "
+                "(the MLX backend builds it itself); transformers 5.x "
+                "rejects it in TrainingArguments on every other backend "
+                "(#1269). Switch backend to 'mlx' or use one of "
+                "adamw_torch, adamw_torch_fused, adamw_bnb_8bit, adafactor."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_v028_speed_memory_supported_tasks(self) -> "SoupConfig":
         """v0.28.0 speed/memory features: every transformer-backend trainer
         is wired in v0.35.0 (#60). MLX backend trainers are still
@@ -5510,7 +5548,8 @@ class SoupConfig(BaseModel):
 
         Delegates to :func:`grpo_long_context.validate_long_context_grpo_compat`
         so the rules are single-source-of-truth (mirrors v0.49.0 LongLoRA).
-        Staged field is accepted but unconsumed, and refused as of v0.77 (#808).
+        Staged field is accepted but unconsumed; the release that refuses it is
+        named once, in ``config/staged_fields.py`` (#808).
         """
         if not self.training.long_context_grpo:
             return self
@@ -6019,9 +6058,9 @@ class SoupConfig(BaseModel):
                         f"(trainer/sft.py), so it would be stored and never take "
                         f"effect. Remove it, or use one of those tasks."
                     )
+        default_aux = type(tcfg).model_fields["moe_aux_loss_coeff"].default
         if self.task not in _MOE_AUX_LOSS_TASKS:
-            default = type(tcfg).model_fields["moe_aux_loss_coeff"].default
-            if tcfg.moe_aux_loss_coeff != default:
+            if tcfg.moe_aux_loss_coeff != default_aux:
                 raise ValueError(
                     f"training.moe_aux_loss_coeff={tcfg.moe_aux_loss_coeff!r} is "
                     f"not applied by task={self.task!r}: only "
@@ -6033,13 +6072,28 @@ class SoupConfig(BaseModel):
             # #1394: only SFT's text setup reads it. The vision and audio setups
             # build their model without the MoE step, the same gap #1179 closed
             # for moe_lora on these paths.
-            default = type(tcfg).model_fields["moe_aux_loss_coeff"].default
-            if tcfg.moe_aux_loss_coeff != default:
+            if tcfg.moe_aux_loss_coeff != default_aux:
                 raise ValueError(
                     f"training.moe_aux_loss_coeff={tcfg.moe_aux_loss_coeff!r} is "
                     f"not applied by task='sft' with modality={self.modality!r}: "
                     "that setup never applies the MoE auxiliary loss. Remove it, "
                     "or train with modality: text."
+                )
+        if self.backend == "unsloth":
+            # #1412: unsloth loader never applies the MoE auxiliary loss coefficient.
+            if tcfg.moe_aux_loss_coeff != default_aux:
+                raise ValueError(
+                    f"training.moe_aux_loss_coeff={tcfg.moe_aux_loss_coeff!r} is "
+                    "not applied on backend='unsloth': that setup never applies "
+                    "the MoE auxiliary loss. Remove it, or train with backend: transformers."
+                )
+        if tcfg.stream_layers:
+            # #1412: layer streaming setup never sets the router coefficient.
+            if tcfg.moe_aux_loss_coeff != default_aux:
+                raise ValueError(
+                    f"training.moe_aux_loss_coeff={tcfg.moe_aux_loss_coeff!r} is "
+                    "not applied with training.stream_layers: that setup never "
+                    "applies the MoE auxiliary loss. Remove it, or train without stream_layers."
                 )
         return self
 
@@ -6651,14 +6705,50 @@ class SoupConfig(BaseModel):
             conflicts.append("fp8_attention")
         if tcfg.nvfp4:
             conflicts.append("nvfp4")
+        # #1692 — `use_liger` / `use_flash_attn` are read only by the RESIDENT
+        # setup (`sft.py::_setup_transformers`): Liger patches the MLP forward
+        # there, and flash-attn is handed to `from_pretrained` as
+        # `attn_implementation`. A streamed run goes to
+        # `_setup_streaming_transformers` (the streamed branch of
+        # `SFTTrainerWrapper.setup`), and its model is built by
+        # `AutoModelForCausalLM.from_config(...)` in `build_meta_skeleton`
+        # (`utils/layer_stream_runtime.py`) with NO attention argument and no Liger
+        # patch, so neither switch reaches the backend. `_liger_applied` is never
+        # set there either, so `use_liger_kernel` misses `TrainingArguments` as
+        # well. These are the switches a user reaches for when a streamed run will
+        # not fit, so silently dropping them is the worst outcome: refuse until
+        # each is wired and shown to engage on a streamed model. (`use_cut_ce` has
+        # the same shape and is #1206.)
+        if tcfg.use_liger:
+            conflicts.append("use_liger")
+        if tcfg.use_flash_attn:
+            conflicts.append("use_flash_attn")
         if conflicts:
-            raise ValueError(
+            message = (
                 f"training.stream_layers is mutually exclusive with "
                 f"{', '.join(conflicts)}: streaming owns the model-construction "
                 f"path (meta skeleton + per-layer weight substitution) and "
                 f"cannot share it with a feature that rewrites or re-freezes "
                 f"the same layers."
             )
+            # Only when a kernel switch is actually named: without one, the message has
+            # to stay byte-identical to what the other nine conflicts have always said.
+            # An earlier cut appended the clause unconditionally, which left all nine
+            # ending in "layers. " with a trailing space, and a control written against
+            # `str(exc.value)` could not see it -- pydantic's multi-line rendering never
+            # ends the way these messages do. Build first, append second, and pin
+            # `errors()[0]["msg"]`.
+            dropped = [name for name in ("use_liger", "use_flash_attn") if name in conflicts]
+            if dropped:
+                message += (
+                    f" {' and '.join(dropped)} "
+                    f"{'is' if len(dropped) == 1 else 'are'} never reached at all: "
+                    f"the streamed model is built by from_config with no attention "
+                    f"argument and no Liger patch, so the resident setup is the only "
+                    f"thing that reads "
+                    f"{'it' if len(dropped) == 1 else 'them'}."
+                )
+            raise ValueError(message)
         return self
 
     @model_validator(mode="after")
@@ -8155,6 +8245,60 @@ class SoupConfig(BaseModel):
         )
 
     @model_validator(mode="after")
+    def _validate_rope_scaling_is_applied(self) -> "SoupConfig":
+        """#1697 — ``rope_scaling_type`` loaded on every task and path, but only
+        the ``_setup_transformers`` of the SFT and pretrain wrappers reads it.
+        Everywhere else the run trained on the checkpoint's own RoPE without a
+        word. The ``yarn_*`` keys are named with it: they are legal only beside
+        ``rope_scaling_type: yarn``, so removing one key alone would be refused
+        next. Settings are named in the order ``resolve_trainer`` and the
+        wrapper's ``setup`` check them, as in :meth:`_validate_freeze_is_applied`."""
+        tcfg = self.training
+        if tcfg.rope_scaling_type is None:
+            return self
+        fields = ["training.rope_scaling_type"] + [
+            f"training.{name}"
+            for name in ("yarn_factor", "yarn_attn_factor", "yarn_beta_fast", "yarn_beta_slow")
+            if getattr(tcfg, name) is not None
+        ]
+        named = fields[0] if len(fields) == 1 else f"{', '.join(fields[:-1])} and {fields[-1]}"
+        verb = "is" if len(fields) == 1 else "are"
+        keys = {1: "the key", 2: "both keys"}.get(len(fields), f"the {len(fields)} keys")
+        if self.task not in ROPE_SCALING_APPLYING_TASKS:
+            raise ValueError(
+                f"{named} {verb} not applied by task={self.task!r}: only task='sft', "
+                "'tts' and 'pretrain' rescale RoPE, so this run would train on the "
+                f"checkpoint's own RoPE. Use one of those tasks, or remove {keys}."
+            )
+        off_path = []
+        # PretrainTrainerWrapper.setup branches on the backend only; sft and tts
+        # share SFTTrainerWrapper.setup.
+        if self.task != "pretrain":
+            if self.backend == "mlx":
+                off_path.append(("backend='mlx'", "backend: transformers"))
+            if self.modality in ("vision", "audio"):
+                off_path.append((f"modality={self.modality!r}", "modality: text"))
+            if tcfg.stream_layers:
+                off_path.append(("training.stream_layers=true", "stream_layers: false"))
+        if self.backend == "unsloth":
+            off_path.append(("backend='unsloth'", "backend: transformers"))
+        if not off_path:
+            return self
+        settings = " and ".join(setting for setting, _ in off_path)
+        changes = " and ".join(change for _, change in off_path)
+        # Only sft has a modality or a streaming setup to leave.
+        where = (
+            "on the text path with backend: transformers and no layer streaming"
+            if self.task == "sft"
+            else "with backend: transformers"
+        )
+        raise ValueError(
+            f"{named} {verb} not applied by task={self.task!r} with {settings}: "
+            f"RoPE is rescaled only {where}, so this run would train on the "
+            f"checkpoint's own RoPE. Use {changes}, or remove {keys}."
+        )
+
+    @model_validator(mode="after")
     def _validate_unsloth_has_a_setup(self) -> "SoupConfig":
         """#1357 — ``backend: unsloth`` on a task outside
         :data:`UNSLOTH_SETUP_TASKS` was accepted and never applied: that trainer
@@ -8540,7 +8684,6 @@ output: ./output
 
 base: meta-llama/Llama-3.1-8B-Instruct
 task: sft
-# backend: unsloth  # 2-5x faster, pip install "soup-cli[fast]"
 
 data:
   train: ./data/long_context_train.jsonl

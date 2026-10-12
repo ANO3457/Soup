@@ -46,8 +46,8 @@ soup export --model ./output --format gguf    Export to GGUF (Ollama)
 soup export --model ./output --deploy ollama  Export GGUF + auto-deploy to Ollama
 soup export --model ./output --format onnx    Export to ONNX
 soup export --model ./output --format tensorrt  Export to TensorRT-LLM
-soup export --model ./output --format awq --calibration-data cal.jsonl  Export to AWQ (4-bit; deprecated, removed in the next release)
-soup export --model ./output --format gptq --calibration-data cal.jsonl  Export to GPTQ (4-bit; deprecated, removed in the next release)
+soup export --model ./output --format awq --calibration-data cal.jsonl  Export to AWQ (4-bit; deprecated, removed in Soup v0.77)
+soup export --model ./output --format gptq --calibration-data cal.jsonl  Export to GPTQ (4-bit; deprecated, removed in Soup v0.77)
 soup deploy ollama --model m.gguf --name x    Deploy GGUF to Ollama
 soup deploy ollama --list                     List Soup-deployed models
 soup deploy ollama --remove <name>            Remove model from Ollama
@@ -274,6 +274,7 @@ soup bom emit --name <n> --base-sha <hex> --config-sha <hex> --format cyclonedx|
 soup adapters scan <adapter>                  Spectral backdoor scan (rank-1 dominance + outlier detection)
 soup adapters sign <adapter> [--backend unsigned|ed25519|sigstore] [--key <pem>|--generate-key <pem>] [--interactive-oidc]  Merkle manifest + ed25519/Sigstore sign
 soup adapters verify <adapter> [--strict] [--public-key <pem>] [--cert-identity <san> --cert-oidc-issuer <url>]  Verify manifest + ed25519/Sigstore signature
+soup adapters check <adapter> [--json]        Is the adapter trained? Total/per-layer ||dW||_F, live fraction, all-zero lora_B, leaked .inner. keys; ends in alive or inactive: <reason> (exit 0 / 2; 1 = usage error)
 soup adapters check-safetensors <adapter> [--strict]  Refuse pickle / PyTorch-classic weights
 soup adapters merge ... [--license <id>] [--license-override <reason>] [--allow-unscanned]  License + backdoor-scan gates (auto-detect license; scan FAIL refused)
 soup adapters arithmetic "coder + 0.5*math - toxic" --adapter coder=<p> --adapter math=<p> --adapter toxic=<p> -o <out> [--allow-unscanned --allow-cross-base]  Task-vector algebra over LoRA adapters (add/scale/negate; same-rank; scan + same-base gated) (v0.71.34)

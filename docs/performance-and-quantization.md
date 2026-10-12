@@ -175,7 +175,10 @@ format-v2 metadata records a `local-sha256:` identity derived from the
 Transformers selects (or its index and referenced shards). The identity uses
 relative file names and content, so moving the same base keeps resume valid;
 changing a selected file refuses resume. Soup checks the identity before and
-after loading the model. A local base whose `config.json` declares another
+after loading the model. A first resume from a format-v1 checkpoint reuses the
+identity the run already computed instead of reading the base a third time
+(#1199).
+A local base whose `config.json` declares another
 layer count or an incompatible width is refused before any file is hashed; a
 value that is missing or not an integer is left to the post-load gate. The
 sidecar and `config.json["soup_quest"]` contain the identity, not the source
@@ -368,7 +371,16 @@ training:
 | `aqlm` | 2 | Extreme compression. | aqlm |
 | `eetq` | 8 | Fast 8-bit kernel for SM75+. | eetq |
 | `mxfp4` | 4 (stored) | Train LoRA on top of an MXFP4 pre-quantized checkpoint (for example GPT-OSS). Loaded with `Mxfp4Config(dequantize=True)`, so it trains in bf16: transformers does not train MXFP4 weights as loaded. Budget memory for the bf16 model, an estimated 2 bytes per parameter (roughly 42 GB for a 20B base). The `soup train` VRAM pre-flight checks an `mxfp4` run against that estimate, as it does a `quantization: none` run, and `--allow-oom-attempt` launches one it refuses. | — |
-| `fp8` | — | Train fp16/bf16 on top of FP8-released checkpoints. | transformers ≥ 4.45 |
+| `fp8` | — | Train LoRA on top of an FP8-released checkpoint. Loaded with `FineGrainedFP8Config(dequantize=True)`, so it trains in bf16: budget memory for the bf16 model, an estimated 2 bytes per parameter, not for the FP8 file. | transformers ≥ 5.17.0 |
+
+**VRAM pre-flight.** Before the model loads, `soup train` prices the weights
+of the chosen format and refuses a run that does not fit the card
+(`--allow-oom-attempt` launches it anyway). The figures are estimates, in bytes
+per parameter: `4bit` 0.5, `8bit` 1.0, `none` 2.0, `gptq` and `awq` 0.55,
+`aqlm` 0.5, `eetq` 1.0, and 2.0 for `mxfp4` and `fp8`, which are dequantized on
+load. `hqq:*` has no figure yet, so the run starts and the pre-flight prints
+`Pre-flight skipped: no memory model for quantization: hqq:4bit` (with the
+format you set). No refusal there does not mean the run fits.
 
 **Compatibility matrix.** `soup train` runs `check_quant_distributed_compat()` at
 startup. HQQ / EETQ / AQLM hard-fail with FSDP and ZeRO-3 (sourced from
@@ -683,6 +695,7 @@ prints this advice when it sees you accumulating.
 - `lora.use_dora` / `lora.use_vera` / `lora.init_strategy` other than `random` → these initialise from the real base weight, which is on the meta device under streaming
 - `moe_expert_quant` → expert quantization runs only in the resident model-construction path and would otherwise be silently ignored
 - `unfrozen_parameters`, `lisa_enabled`, `packing`, `multipack`, `use_fsdp2_compile`, `train_router_only`, `expand_layers` → each independently rewrites or re-freezes the same layers
+- `use_liger` / `use_flash_attn` → **not reached at all** under streaming (#1692). Both are read by the *resident* setup: Liger patches the MLP forward there, and flash-attn is handed to `from_pretrained` as `attn_implementation`. A streamed model is built by `from_config` with no attention argument and no Liger patch, and `_liger_applied` is never set, so `use_liger_kernel` misses `TrainingArguments` too. These are the switches you reach for when a streamed run will not fit, so they are refused rather than dropped; each is offered again once it is wired and shown to engage on a streamed model. On every task outside `{sft, tts}` they are already refused at config load (#806)
 - `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_read_ahead` / `stream_vram_override` / `stream_vram_probe` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
 - a non-default `stream_read_ahead` beside `stream_source: ram` → refused. The read-ahead reader belongs to the NVMe disk tier and `ram` never falls back to it, so the setting would validate, be documented, and reach nothing. The default is accepted, because a default is not a decision
 - a disk-tier run whose host staging (`stream_read_ahead` layers, plus one slot each for the embedding and an untied `lm_head`) plus the resident extras will not fit the free-RAM headroom → refused by name, naming the depth to lower. Refused rather than clamped: a depth you set is a decision, and silently lowering it would hand back a slower run than the one you configured
@@ -741,7 +754,7 @@ output: ./output
 > print(len(load_file('adapter_model.safetensors')))"
 > ```
 >
-> `0` means the adapter is lost. Fixed on `main` by PR #1010 (the wrapper now reports canonical names, so peft 0.20 and 0.21 both save every tensor; no `peft<0.21` pin); the next release carries it. Until you run a Soup with that fix, `pip install "peft<0.21"` is the workaround.
+> `0` means the adapter is lost. Fixed on `main` by PR #1010 (the wrapper now reports canonical names, so peft 0.20 and 0.21 both save every tensor; no `peft<0.21` pin); v0.76.0 carries it. Until you run a Soup with that fix, `pip install "peft<0.21"` is the workaround.
 >
 > Since #1011, a streamed run also checks every checkpoint and the final save: if `adapter_model.safetensors` is missing, carries the wrapper's `.inner.` keys, or holds a different number of LoRA tensors than the model trained, the run stops with a `RuntimeError` instead of reporting success. The manual check above is only needed for adapters saved before that.
 
@@ -826,8 +839,12 @@ above); it does not make the reference free.
 **Disk pre-flight and shard cache.** Before Soup materialises or shards a checkpoint, it
 reports the complete projected footprint: the HF/local source, any regular-file copy Soup
 still needs, and the per-layer shard cache. Required writes are grouped by target volume and
-the run refuses before either write when that volume lacks free space. Override the two cache
-roots with `SOUP_SPECTRUM_CACHE_DIR` and `SOUP_LAYER_STREAM_CACHE_DIR`; both retain Soup's
+the run refuses before either write when that volume lacks free space. With
+`SOUP_LAYER_STREAM_STRIPE_DIRS` set, each root is charged the bytes it will receive,
+read from the source safetensors headers (the primary root also holds the embedding,
+head and extras); when a header cannot be read or the model is qwen4_exp the split is
+even and the panel says approximately. Override the two cache roots with
+`SOUP_SPECTRUM_CACHE_DIR` and `SOUP_LAYER_STREAM_CACHE_DIR`; both retain Soup's
 home/cwd/tmp containment policy.
 
 **Two or more NVMe drives.** On a cold store larger than RAM the disk-tier step can wait on the
@@ -963,7 +980,7 @@ all-masked sequence or saving a non-finite adapter.
 Every command that loads a model now requires `--trust-remote-code` to execute custom Python from a model repo (`auto_map` in `config.json`). First-party orgs (Meta, Mistral, Qwen, Google, etc.) suppress the warning panel; everything else prints a `REMOTE CODE WARNING` panel before loading. Unknown-org local checkpoints with `auto_map` raise a friendly `ValueError` at construction time instead of silently exec'ing inside `from_pretrained`.
 
 Coverage:
-- `soup train` (every task - SFT, DPO, GRPO, KTO, ORPO, SimPO, IPO, PPO, Reward Model, Pretrain, Embedding, BCO, and the unified Preference dispatcher; automatic evaluation after training keeps the flag disabled, see `docs/evaluation.md`)
+- `soup train` (every task - SFT, DPO, GRPO, KTO, ORPO, SimPO, IPO, PPO, Reward Model, Pretrain, Embedding, BCO, and the unified Preference dispatcher; automatic evaluation after training follows the run's flag, see `docs/evaluation.md`)
 - `soup chat`, `soup serve`, `soup data download`, `soup eval auto`
 - `soup diff`, `soup export`, `soup merge`, `soup infer`, `soup data generate`
 - `soup eval benchmark`, `soup eval custom`, `soup train --find-lr`, `soup draft distill`, `soup shrink`
@@ -1182,7 +1199,7 @@ training:
   gradient_checkpointing: true  # Required for long sequences
 
   # Long-context (128k+ tokens)
-  rope_scaling_type: dynamic  # RoPE scaling: linear, dynamic, yarn, llama3
+  rope_scaling_type: dynamic  # RoPE scaling: linear, dynamic, yarn, llama3; sft/tts/pretrain on backend: transformers only
   # use_ring_attention: true  # Sequence parallelism across GPUs
 
 data:
@@ -1274,7 +1291,7 @@ Both reject silently-no-op combinations: setting either flag without `moe_lora=t
 |---|---|---|
 | `moe_lora` | `sft`, `pretrain`, `tts`, (since #798) `dpo`, `kto`, `orpo`, `simpo`, `grpo`, (since #1099) `ipo`, `bco`, `reward_model`, `ppo`, `embedding`, `online_dpo`, and (since #1151) `distill`, `unlearn`, and `classifier`, `reranker`, `cross_encoder` with `classifier_lora: true` | refused at config load, naming the reason, on `asr`, `moe_lora_routing`, `prm`, the classifier family without `classifier_lora: true` and `lora.r > 0`, `backend: unsloth` (any task), and `task: sft` with `modality: vision` or `audio` |
 | `moe_expert_quant`, `train_router_only` | `sft`, `tts` | refused at config load, naming the task |
-| `moe_aux_loss_coeff` | `sft` (text), `tts`, `pretrain` | a **non-default** value is refused, including on `task: sft` with `modality: vision` or `audio` (#1394), whose setup never applies the auxiliary loss; the default `0.01` still loads, because every stored config and the shipped MoE recipes on those tasks write it |
+| `moe_aux_loss_coeff` | `sft` (text), `tts`, `pretrain` | a **non-default** value is refused, including on `task: sft` with `modality: vision` or `audio` (#1394), on `backend: unsloth`, and with `training.stream_layers: true` (#1412), whose setups never apply the auxiliary loss; the default `0.01` still loads, because every stored config and the shipped MoE recipes on those tasks write it |
 
 **`moe_lora` on the remaining LoRA tasks (#1099).** #798 left it loading but unread on `ipo`, `bco`, `reward_model`, `ppo` and `embedding`, and `online_dpo` had the same gap. All six build their adapter through the same `build_lora_config` path, so they were wired to the same helper rather than refused. On `embedding` it applies only with `lora.r >= 1`; at `r: 0` that trainer full-fine-tunes and builds no adapter for the flag to select. #1151 closed the remainder: `distill` and `unlearn` build their adapter the same way and are wired to the same helper, and so is `classifier` / `reranker` / `cross_encoder` (one trainer) on its opt-in adapter path. Without `classifier_lora: true` and `lora.r > 0` that trainer full-fine-tunes and builds no adapter, so there the flag is refused at config load; `asr`, which trains only Whisper (no experts), `moe_lora_routing`, which builds no LoRA adapter, and `prm`, which fine-tunes every base parameter, refuse the flag at config load. Two paths refuse it whatever the task: `task: sft` with `modality: vision` or `audio`, whose setup builds its adapter without the MoE step, and `backend: unsloth`. On unsloth the reason depends on the task (#1264): the thirteen tasks with an unsloth setup attach its fixed attention list and never read the flag, while the rest have no unsloth setup at all, so there it is the backend that goes unapplied. Both messages point to `backend: transformers`, where the flag is read. The other `moe_lora` refusals in the same check come first, so `asr`, `prm`, `moe_lora_routing` and SFT vision/audio get one refusal whatever the backend. Every path now either reads `moe_lora` or refuses it, except `backend: mlx`, where it loads and `soup doctor --config` reports it as ignored; a source ratchet keeps a new adapter-building trainer from missing it. `train_router_only` and `moe_expert_quant` require `moe_lora: true`, so on `backend: unsloth` they now fail to load with the same message. `preference` is covered through the trainers it dispatches to, and `tts` through the SFT trainer it subclasses.
 
@@ -1294,7 +1311,7 @@ Both reject silently-no-op combinations: setting either flag without `moe_lora=t
 | `mixtral` | **no — attention-only** | yes |
 | `kimi_k2` | **not measured** (no stand-in builds here) | not measured |
 
-`minimax-m3-sft` still trains attention-only LoRA: it sets no `moe_lora`, since it loads through SFT's vision path, which never runs the MoE step, and `minimax-m3-dpo` was removed because DPO cannot build the `minimax_m3_vl` wrapper (#1145). The seven `kimi-k2.x` recipes that set `moe_lora` are untested rather than known-good — no tiny stand-in for those configs exists in the installed transformers. A checkpoint that still keeps one `nn.Linear` per expert (the transformers-4 layout) is handled as before: the projections are named as modules and no `target_parameters` are added.
+`minimax-m3-sft` still trains attention-only LoRA: it sets no `moe_lora`, since it loads through SFT's vision path, which never runs the MoE step, and `minimax-m3-dpo` was removed because DPO cannot build the `minimax_m3_vl` wrapper (#1145). The seven `kimi-k2.x` recipes that set `moe_lora` are untested rather than known-good — no tiny stand-in for those configs exists in the installed transformers. A checkpoint that still keeps one `nn.Linear` per expert (the transformers-4 layout) is handled as before: the projections are named as modules and no `target_parameters` are added. `moe_lora` together with `lora.use_vera: true` is refused on a fused-expert model (#1197): VeRA wraps `nn.Linear` modules only and has no `target_parameters` path, so the flag would adapt attention (and a shared expert) exactly as VeRA without it; set `use_vera: false` to adapt the experts with LoRA, or drop `moe_lora`. The per-expert-Linear layout is not refused, VeRA wraps those.
 
 **`target_modules: auto` on a MoE base.** Until #1070 `resolve_lora_target_modules` had no mapping for any MoE architecture Soup ships, so `auto` resolved to `None` and peft refused with `No target_modules passed but also no target_parameters found`. Those architectures now resolve to their attention projections (see `docs/peft-and-efficiency.md`); a MoE architecture neither Soup nor peft maps is refused at setup, naming it. With `moe_lora: true` the targets come from the model scan instead, and that is applied *before* the refusal is decided, so `moe_lora` still works on an unmapped MoE such as `qwen2_moe`.
 
@@ -1362,7 +1379,7 @@ group_size: 32
 EOF
 soup export --model ./merged --format torchao --quant-config ./q.yaml --output ./out
 
-# AWQ/GPTQ export (deprecated, removed in the next release) — an explicit local calibration set is required
+# AWQ/GPTQ export (deprecated, removed in Soup v0.77) — an explicit local calibration set is required
 soup export --model ./merged --format awq \
     --calibration-data ./calib.jsonl --output ./out-awq
 soup export --model ./merged --format gptq \
@@ -1383,7 +1400,7 @@ soup deploy autopilot --target rtx-4090-24gb \
 
 Autopilot also detects pre-quantized bases automatically - `TheBloke/Llama-2-7B-Chat-GPTQ` is recommended `gptq` instead of stacking 4-bit on top. Detection runs against the base-model name regex AND any local `config.json`'s `quantization_config.quant_method`. Out-of-cwd model paths are silently skipped (soft-probe semantics). A detected `mxfp4` base is budgeted as the bf16 model it loads (2 bytes per parameter), and Autopilot refuses a `--gpu-budget` below that.
 
-AWQ and GPTQ export are deprecated and will be removed in the next release: both upstream projects (AutoAWQ and AutoGPTQ) are archived and neither extra can be installed next to `[train]`. Until then `soup export --format awq` and `--format gptq` work as before and start with a `Deprecated:` notice that names the formats to move to (`gguf`, `onnx`, `tensorrt`, `bitnet`, `tq1_0`).
+AWQ and GPTQ export are deprecated and will be removed in Soup v0.77: both upstream projects (AutoAWQ and AutoGPTQ) are archived and neither extra can be installed next to `[train]`. Until then `soup export --format awq` and `--format gptq` work as before and start with a `Deprecated:` notice that names the formats to move to (`gguf`, `onnx`, `tensorrt`, `bitnet`, `tq1_0`).
 
 Direct AWQ and GPTQ exports require `--calibration-data`. Soup refuses a missing or unusable JSONL before importing the quantizer or loading the model. This keeps calibration inputs explicit and prevents AutoAWQ from silently downloading its large default dataset. Use `--calibration-samples` to cap the number of usable JSONL rows (default: 128).
 

@@ -391,7 +391,9 @@ directly comparable. Unspaced scripts (like Lao, Khmer, Myanmar, and halfwidth k
 
 **Verdict pill colours:** OK (≥ 0.85) green / MINOR (≥ 0.60) amber / MAJOR (< 0.60) red. `soup diagnose` exits 2 when the overall verdict is MAJOR - wire into CI to fail the build on regression - and exits 3 when a requested probe did not run (see `NOT_RUN` below).
 
-**`NOT_RUN` (grey):** a live probe that was requested but produced no measurement is reported as `NOT_RUN`, never as OK 1.00. That covers a `--dataset` or `--holdout` with no usable prompt/answer rows and a probe that raised; the evidence column keeps the reason, including the exception text. `NOT_RUN` ranks above MINOR and below MAJOR in the overall verdict, and the badge and the table show it grey as `not run` / `-` instead of a score (the stored `0.0` in the JSON report is a placeholder, not a measurement; an `--evidence` entry for `NOT_RUN` may omit the score or give `0.0`). `soup diagnose` exits 3 when the overall verdict is `NOT_RUN`; pass `--allow-not-run` to keep exit 0 for runs that knowingly skip probes. MAJOR still exits 2. Probes that do not apply stay a neutral OK (format when the dataset targets are not JSON, contamination without a benchmark corpus, citation on non-RAFT rows, dataset probes when no `--dataset` is given). On the `--evidence` path, a mode you leave out of the file also becomes a neutral OK and is not gated; a mode you list with `"verdict": "NOT_RUN"` (score omitted or `0.0`) is `NOT_RUN`, so the run exits 3, and `soup train --diagnose-gate` refuses it the same way. A bad `--tokenizer` is an input error (exit 3) raised before any model loads. For `--dataset` and `--holdout`, the live probes currently read rows with a prompt key (`prompt`, `instruction`, `input`, `question` or `query`) plus an answer key (`response`, `completion`, `output`, `answer`, `chosen` or `text`), or a `messages` list; other shapes (ShareGPT `conversations`, LLaVA, plaintext) make the corresponding probes `NOT_RUN`. Memorization additionally needs a `text`, `content`, `prompt`, `instruction` or `messages` field, and is `NOT_RUN` when none of the first rows has one.
+**`NOT_RUN` (grey):** a live probe that was requested but produced no measurement is reported as `NOT_RUN`, never as OK 1.00. That covers a `--dataset` or `--holdout` with no usable prompt/answer rows and a probe that raised; the evidence column keeps the reason, including the exception text. `NOT_RUN` ranks above MINOR and below MAJOR in the overall verdict, and the badge and the table show it grey as `not run` / `-` instead of a score (the stored `0.0` in the JSON report is a placeholder, not a measurement; an `--evidence` entry for `NOT_RUN` may omit the score or give `0.0`). `soup diagnose` exits 3 when the overall verdict is `NOT_RUN`; pass `--allow-not-run` to keep exit 0 for runs that knowingly skip probes. MAJOR still exits 2. Probes that do not apply stay a neutral OK (format when the dataset targets are not JSON, contamination without a benchmark corpus, citation on non-RAFT rows, dataset probes when no `--dataset` is given). On the `--evidence` path, a mode you leave out of the file also becomes a neutral OK and is not gated; a mode you list with `"verdict": "NOT_RUN"` (score omitted or `0.0`) is `NOT_RUN`, so the run exits 3, and `soup train --diagnose-gate` refuses it the same way. A bad `--tokenizer` is an input error (exit 3) raised before any model loads.
+
+**Dataset formats for live probes (`--base-model` + `--dataset` or `--holdout`):** rows are read the way training reads them (`detect_format` + the format converters). ShareGPT `conversations`, Alpaca `instruction` + `input` (joined with a newline, plus `system` when present), ChatML `messages` (the turns before the first assistant reply are the prompt), tool-calling rows (the final reply is the answer) and DPO / KTO rows with string `prompt` and answer fields give the format and mode-collapse probes (from `--dataset`) and the forgetting probe (from `--holdout`) a prompt/answer pair; flat `prompt`/`completion`, `question`/`answer` style rows keep working. Memorization needs text, not pairs, so it also runs on plaintext (`text`) rows, while the probes that need a pair report `NOT_RUN` when plaintext is all there is ("plaintext rows have no prompt/answer split"). LLaVA / ShareGPT4V and audio rows are skipped because the probe generators are text-only, in `--holdout` as well as `--dataset`. For `--dataset`, when media rows are the main reason no pair was found, the pair-based probes report `NOT_RUN` with the "rows need an image" / "audio" reason (memorization too, when no row has text), and in a mixed file the text rows still run; a prompt over 8192 characters or containing a NUL byte is skipped by the prompt/answer probes instead of failing them (an over-long prompt's text still reaches memorization); if no usable pair is left the probes are `NOT_RUN` with the dominant cause as the reason (media, over-long prompts, no answer, plaintext, or unreadable rows); and the rows those probes skipped (unreadable, over-long, without an answer, or media) are counted in the report's `extras.rows_skipped` and printed as `Rows skipped: ...`. For `--holdout`, rows that yield no pair (including media rows) are dropped silently, and forgetting is `NOT_RUN` ("--holdout has no usable prompt/answer rows") when none is left; over-long and NUL-byte hold-out prompts are not filtered.
 
 **Post-training gate:** `soup train --diagnose-gate <evidence.json>` runs the same scorer after training finishes and refuses to mark the run successful when any mode comes back MAJOR (exit 2) or `NOT_RUN` (exit 3). Composes with `--gate <eval-suite>` (v0.26) — the eval gate catches accuracy regressions vs a baseline; the diagnose gate catches behaviour regressions the eval suite is blind to.
 
@@ -470,9 +472,14 @@ of being rounded away. The scorer is answer-**extraction** — a spurious substr
 (`"B"` in "**B**erlin") no longer scores, which is a **breaking** change from the v0.25.0
 substring scorer (an existing run's verdict can flip; recompute any committed `--baseline`).
 As of v0.76.0, `mini_tool_call` mixes tool calls with direct-answer prompts and requires the
-literal response `NO_TOOL` for the latter. This deliberately moves the suite away from its former
-1.000 ceiling; baseline provenance revision 2 prevents scores from the earlier scale from being
-compared silently with the new fixture.
+literal response `NO_TOOL` for the latter (16 of its 40 rows). This deliberately moves the suite
+away from its former 1.000 ceiling. `mini_arithmetic` (multi-step and large-operand rows) and
+`mini_common_sense` (40 rows, an answer key that no longer favours one letter) were revised the same
+way (#1192). The bundled-scorer provenance revision is 5 at v0.76.0 (it was 1 through v0.75.2):
+revision 2 is the `mini_tool_call` fixture, 3 the refusal classifier behind `mini_safety` and
+`mini_over_refusal`, 4 the `mini_arithmetic` fixture and 5 the `mini_common_sense` fixture. A
+`--baseline` stamped with another revision, or with none, warns instead of being compared silently
+on the new scale; recompute it.
 `mini_safety` and `mini_over_refusal` form a dual gate: under-refusal regresses safety, over-refusal
 regresses utility (neither axis can be gamed alone). `--general-suite <names>` with any non-bundled
 name routes through the lm-eval harness. Pairwise judge win-rate (`--task-mode pairwise`) shipped
@@ -678,8 +685,9 @@ print(report.delta_status, report.mean_kl)
 # OK 0.012
 ```
 
-The kernel is pure-math and capped at 10 000 prompts to defend against
-accidental OOM. `CalibrationReport` is a frozen dataclass.
+The kernel is pure-math, evaluates stable log-probabilities using log-softmax
+without artificial probability flooring, and is capped at 10 000 prompts to
+defend against accidental OOM. `CalibrationReport` is a frozen dataclass.
 
 
 ## Model Arena (Elo Tournament)
@@ -748,6 +756,12 @@ soup eval leaderboard --format csv
 # Human A/B evaluation with Elo ratings
 soup eval human --input prompts.jsonl --model-a ./model_a --model-b ./model_b
 ```
+
+`soup eval benchmark` saves only requested names with numeric metrics, including a real
+`0.0` (not a boolean). Missing or scoreless results are skipped, named and counted;
+the saved banner reports the saved count. It exits `0` when at least one result was
+saved, or `1` when nothing was measured or saved. A requested group needs its own
+numeric entry in `results`; this command does not save its sub-task rows automatically.
 
 `soup eval judge` asks the judge for one JSON object, `{"scores": {"<criterion>": <number>, ...}, "reasoning": "..."}`, and reads the first object in the reply that has a `scores` key, so reasoning that quotes JSON of its own does not get in the way. Criterion names match case-insensitively, and a score given as `{"score": N}` is read as `N`. A reply with no JSON object, with no finite number for a rubric criterion, or with one criterion under two spellings (`Helpfulness` and `helpfulness`) is an error that names the criterion where there is one, instead of a score at the scale minimum. A reply longer than 65,536 characters is refused unread; the judge is asked for at most 1,024 tokens, so only a runaway reply gets that long. `soup eval judge` skips such an item with a warning that carries the error and counts it (it exits `1` only when every item fails), an eval-gate judge task fails with the error as its reason (`soup eval gate` exits `2`), and `soup ship --task-mode judge_score` stops with `live ship verdict failed: ValueError: ...` and exits `1` without a verdict.
 
@@ -899,7 +913,7 @@ When `eval.auto_eval: true`, Soup runs the configured evaluation once after `sou
 - `benchmarks` runs the configured `lm-eval-harness` benchmarks. Install the `soup-cli[eval]` extra above before enabling them.
 - `custom_tasks` runs the configured custom evaluation tasks against the trained model.
 - `judge` is not part of auto-evaluation; configure and run judge evaluation separately.
-- Auto-evaluation keeps `trust_remote_code` disabled even when `soup train --trust-remote-code` was passed, so for a base that ships custom code the evaluation is skipped with a message (`Auto-eval custom failed: ... Please pass the argument trust_remote_code=True`); run `soup eval custom ... --trust-remote-code` yourself for that case.
+- Auto-evaluation follows the run's `--trust-remote-code` flag: `soup train --trust-remote-code` passes it to the evaluation of the trained model (benchmarks and custom tasks); without the flag it stays off. There is no `soup.yaml` key for it.
 - If auto-evaluation fails, Soup reports the failure but does not fail an otherwise successful training run.
 - Auto-evaluation can take a significant amount of time. For example, MMLU evaluates multiple subtasks.
 

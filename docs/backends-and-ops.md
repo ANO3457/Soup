@@ -37,7 +37,7 @@
 - [Standalone Sweep Config](#standalone-sweep-config)
 - [Alternative Model Hubs (ModelScope / Modelers)](#alternative-model-hubs-modelscope--modelers)
 - [Experiment Trackers (MLflow / SwanLab / Trackio)](#experiment-trackers-mlflow--swanlab--trackio)
-- [Telemetry (opt-IN, hardware-info-only)](#telemetry-opt-in-hardware-info-only)
+- [Telemetry (opt-in)](#telemetry-opt-in)
 - [Plugin System](#plugin-system)
 - [External Integrations Catalog](#external-integrations-catalog)
 - [Advanced Trainer Plugins](#advanced-trainer-plugins)
@@ -197,9 +197,9 @@ training:
     alpha: 16
 ```
 
-Works with the tasks that have an unsloth setup: SFT (text; SFT vision and audio still run the transformers setup), DPO, GRPO, PPO, KTO, ORPO, SimPO, IPO, BCO, preference, Pretrain, Embedding and TTS. The others (`reward_model`, `prm`, `classifier`, `reranker`, `cross_encoder`, `distill`, `unlearn`, `moe_lora_routing`, `online_dpo` and `asr`) have no unsloth setup, so `backend: unsloth` is refused at config load for them (#1357). If unsloth is installed but not enabled, Soup will suggest it automatically.
+Works with the tasks that have an unsloth setup: SFT (text; SFT vision and audio still run the transformers setup), DPO, GRPO, PPO, KTO, ORPO, SimPO, IPO, BCO, preference, Pretrain, Embedding and TTS. The others (`reward_model`, `prm`, `classifier`, `reranker`, `cross_encoder`, `distill`, `unlearn`, `moe_lora_routing`, `online_dpo` and `asr`) have no unsloth setup, so `backend: unsloth` is refused at config load for them (#1357). If unsloth is installed but not enabled, Soup suggests it, but only for a config that would still load with `backend: unsloth` (#1736): a config one of these refusals would stop gets no suggestion.
 
-> **Tip:** Soup auto-detects unsloth. When installed, you'll see a hint during `soup train` if you haven't enabled it yet.
+> **Tip:** Soup auto-detects unsloth. When it is installed, `soup train` prints a hint if you haven't enabled it yet and your config would load with it.
 
 
 ## Cloud GPU Training
@@ -1174,6 +1174,8 @@ When it doesn't fit, the report names actionable knobs: `--batch-size halve`, `-
 
 The weights bucket assumes 2 bytes/param under `quant="none"` (a frozen base now really does load at the checkpoint's own dtype, typically bf16/fp16 — #339), except `peft="full"` (full fine-tuning), which explicitly loads fp32 master weights and so assumes 4 bytes/param instead.
 
+`mxfp4` and `fp8` are dequantized on load, so they take the same 2 bytes/param. `gptq`, `awq`, `aqlm` and `eetq` stay packed and are priced at their own figures. `soup train` has no figure for `hqq:*` and says it skipped the check ([Quant Menu](performance-and-quantization.md#quant-menu--9-quantization-formats)).
+
 
 ## Shell Completions (`soup completions`)
 
@@ -1191,7 +1193,7 @@ soup completions zsh > "${fpath[1]}/_soup"
 soup completions fish > ~/.config/fish/completions/soup.fish
 ```
 
-Recipe names auto-complete from the 115+ catalogue; `--target-modules` falls back to canonical Llama-shape defaults (`q_proj` / `k_proj` / `v_proj` / etc.). Live HF-config introspection per `base` lands in v0.64.1.
+Command names and option names complete, straight from the live command tree: `rec` + Tab gives `recipes`, and after `soup train`, `--res` + Tab gives `--resume`. Values do not complete yet — recipe names after `soup recipes show`, for instance — because no option or argument is wired to a value completer. Two are ready for that wiring in `soup_cli/utils/completions.py`: `complete_recipe_name`, and `complete_target_modules`, which since v0.71.1 looks the base model's architecture up in its Hugging Face config when that config is already in the local cache (config only, never a download) and offers that architecture's module names, falling back to the canonical Llama-shape defaults (`q_proj` / `k_proj` / `v_proj` / etc.).
 
 
 ## License Advisor (`soup license-advisor`)
