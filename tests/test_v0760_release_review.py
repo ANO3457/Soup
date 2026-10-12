@@ -9,11 +9,18 @@ Security (commit A)
        ``Path.write_text``: no cwd containment, a symlink was followed, and the
        bench path was only checked after the whole run.
     4. ``soup adapters check`` capped the tensor count, not the bytes.
+
+Smoke findings (commit B)
+    5. ``soup data clean --json``: the loader's warning went to stdout before the JSON.
+    6. ``soup rewind --top -1`` dropped the last row; ``--top 0`` printed nothing.
+    7. ``soup rewind``: a NaN-loss row ranked last at 0%, and the headline named
+       the finite row instead.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from io import StringIO
@@ -539,3 +546,202 @@ class TestAdapterByteCap:
         monkeypatch.setattr(adapter_check, "MAX_ADAPTER_BYTES", size)
         report = adapter_check.check_adapter("adapter")
         assert report.total_layers == 1
+
+
+# ================================================= 5. data clean --json =====
+
+
+class TestDataCleanJsonStdout:
+    def test_stdout_is_pure_json_when_the_loader_warns(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        dataset = tmp_path / "rows.jsonl"
+        dataset.write_text(
+            json.dumps({"instruction": "q", "output": "a\x00b"})
+            + "\n{this is not json\n"
+            + json.dumps({"instruction": "q2", "output": "fine"})
+            + "\n",
+            encoding="utf-8",
+        )
+        result = _invoke(["data", "clean", str(dataset), "--dry-run", "--json"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        payload = json.loads(result.stdout)
+        assert payload["total_scanned"] == 2
+        assert payload["dry_run"] is True
+        # The warning is not lost: it moved to stderr.
+        assert "invalid JSON on line 2" in _plain(result.stderr)
+
+    def test_the_loader_console_is_put_back_afterwards(self, tmp_path, monkeypatch):
+        import soup_cli.data.loader as loader
+
+        monkeypatch.chdir(tmp_path)
+        dataset = tmp_path / "rows.jsonl"
+        dataset.write_text(json.dumps({"instruction": "q", "output": "a"}) + "\n")
+        before = loader.console
+        result = _invoke(["data", "clean", str(dataset), "--dry-run", "--json"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert loader.console is before
+
+    def test_the_human_output_keeps_the_warning_on_stdout(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        dataset = tmp_path / "rows.jsonl"
+        dataset.write_text(
+            json.dumps({"instruction": "q", "output": "a"}) + "\n{nope\n", encoding="utf-8"
+        )
+        result = _invoke(["data", "clean", str(dataset), "--dry-run"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert "invalid JSON on line 2" in _plain(result.stdout)
+
+
+# ======================================================= 6. rewind --top ====
+
+
+class TestRewindTopBound:
+    @pytest.fixture
+    def ready(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _build(tmp_path / "rewind.jsonl", _run_entries())
+        _patch_tracker(
+            monkeypatch, {"run_id": "r1", "output_dir": str(tmp_path), "status": "completed"}
+        )
+        return tmp_path
+
+    @pytest.mark.parametrize("value", ["-1", "0"])
+    def test_a_top_below_one_is_a_usage_error(self, ready, value):
+        result = _invoke(["rewind", "--step", "41", "--top", value])
+        out = _plain(result.output)
+        assert result.exit_code == 2, (result.output, repr(result.exception))
+        assert "Invalid value for '--top'" in out
+        assert f"{value} is not in the range x>=1" in out
+
+    def test_one_is_accepted_and_lists_exactly_one_row(self, ready, monkeypatch):
+        import soup_cli.commands.rewind as rewind_cmd
+
+        buffer = StringIO()
+        monkeypatch.setattr(
+            rewind_cmd,
+            "console",
+            Console(file=buffer, force_terminal=False, no_color=True, width=10_000),
+        )
+        result = _invoke(["rewind", "--step", "41", "--top", "1", "--no-preview", "--json",
+                          "o.json"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert len(json.loads((ready / "o.json").read_text(encoding="utf-8"))["rows"]) == 1
+
+
+# ================================================= 7. NaN headline ==========
+
+
+def _nan_entries():
+    """A flat 1.0 run whose step 20 holds one NaN-loss row and one ordinary row."""
+    entries = [(step, 0, [step + 100], [1.0], [10]) for step in range(1, 31) if step != 20]
+    entries.append((20, 0, [7, 8], [math.nan, 2.0], [10, 10]))
+    return entries
+
+
+class TestNonFiniteHeadline:
+    @pytest.fixture
+    def ready(self, tmp_path, monkeypatch):
+        import soup_cli.commands.rewind as rewind_cmd
+
+        monkeypatch.chdir(tmp_path)
+        _build(tmp_path / "rewind.jsonl", _nan_entries())
+        _patch_tracker(
+            monkeypatch, {"run_id": "r1", "output_dir": str(tmp_path), "status": "completed"}
+        )
+        buffer = StringIO()
+        monkeypatch.setattr(
+            rewind_cmd,
+            "console",
+            Console(file=buffer, force_terminal=False, no_color=True, width=10_000),
+        )
+        return tmp_path, buffer
+
+    def test_the_headline_names_the_nan_row_not_the_finite_one(self, ready):
+        work, buffer = ready
+        result = _invoke(["rewind", "--no-preview", "--json", "o.json"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        out = _plain(buffer.getvalue())
+        assert "row 7: loss is non-finite (nan) in step 20" in out
+        assert "Inspect or drop this row, then retrain." in out
+        assert "row 8: 100%" not in out
+
+    def test_the_nan_row_is_listed_first_in_the_table_and_the_json(self, ready):
+        work, _ = ready
+        result = _invoke(["rewind", "--step", "20", "--top", "1", "--no-preview",
+                          "--json", "o.json"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        rows = json.loads((work / "o.json").read_text(encoding="utf-8"))["rows"]
+        # --top 1 would have dropped the NaN row when it sorted last.
+        assert [row["row"] for row in rows] == [7]
+
+    def test_every_non_finite_row_is_counted(self, tmp_path, monkeypatch):
+        import soup_cli.commands.rewind as rewind_cmd
+
+        monkeypatch.chdir(tmp_path)
+        entries = [(s, 0, [s + 100], [1.0], [10]) for s in range(1, 31) if s != 20]
+        entries.append((20, 0, [7, 8, 9], [math.nan, 2.0, math.nan], [10, 10, 10]))
+        _build(tmp_path / "rewind.jsonl", entries)
+        _patch_tracker(
+            monkeypatch, {"run_id": "r1", "output_dir": str(tmp_path), "status": "completed"}
+        )
+        buffer = StringIO()
+        monkeypatch.setattr(
+            rewind_cmd,
+            "console",
+            Console(file=buffer, force_terminal=False, no_color=True, width=10_000),
+        )
+        result = _invoke(["rewind", "--no-preview"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        out = _plain(buffer.getvalue())
+        assert "row 7: loss is non-finite (nan) in step 20" in out
+        assert "2 rows in this step are non-finite" in out
+
+    def test_a_finite_step_keeps_the_share_headline(self, tmp_path, monkeypatch):
+        import soup_cli.commands.rewind as rewind_cmd
+
+        monkeypatch.chdir(tmp_path)
+        _build(tmp_path / "rewind.jsonl", _run_entries())
+        _patch_tracker(
+            monkeypatch, {"run_id": "r1", "output_dir": str(tmp_path), "status": "completed"}
+        )
+        buffer = StringIO()
+        monkeypatch.setattr(
+            rewind_cmd,
+            "console",
+            Console(file=buffer, force_terminal=False, no_color=True, width=10_000),
+        )
+        result = _invoke(["rewind", "--no-preview"])
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        out = _plain(buffer.getvalue())
+        assert "row 13: 99% of step 41's loss, 3,000 tokens" in out
+        assert "non-finite" not in out.split("row 13:")[1]
+
+
+class TestRankRowsNonFinite:
+    def test_a_nan_row_sorts_first_and_the_finite_shares_sum_to_one(self, tmp_path):
+        from soup_cli.monitoring.rewind_log import RewindLog
+        from soup_cli.utils.rewind import rank_rows
+
+        run = _build(
+            tmp_path / RewindLog.FILENAME,
+            [(1, 0, [7, 8, 9], [2.0, math.nan, 4.0], [10, 10, 10])],
+        )
+        ranked = rank_rows(run, 1)
+        assert [r.row for r in ranked] == [8, 9, 7]
+        assert math.isnan(ranked[0].loss)
+        assert ranked[0].share == 0.0
+        assert sum(r.share for r in ranked) == pytest.approx(1.0)
+
+    def test_an_infinite_row_does_not_turn_every_share_into_nan(self):
+        """The log stores inf as null (read back as NaN), so a run object is faked here:
+        ``inf / inf`` would otherwise make the finite row's share NaN as well."""
+        from types import SimpleNamespace
+
+        from soup_cli.utils.rewind import rank_rows
+
+        batch = SimpleNamespace(rows=[7, 8], row_loss=[math.inf, 2.0], row_tokens=[10, 10])
+        run = SimpleNamespace(batches_for=lambda step: [batch])
+        ranked = rank_rows(run, 1)
+        assert ranked[0].row == 7
+        assert all(math.isfinite(r.share) for r in ranked)
+        assert ranked[1].share == pytest.approx(1.0)

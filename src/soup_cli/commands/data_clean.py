@@ -11,10 +11,11 @@ Applies deterministic data cleaning rules:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import typer
 from rich.console import Console
@@ -28,6 +29,27 @@ from soup_cli.utils.paths import atomic_write_text, is_under_cwd
 from soup_cli.utils.terminal import for_terminal
 
 console = Console()
+
+
+@contextlib.contextmanager
+def _loader_warnings_to_stderr(enabled: bool) -> Iterator[None]:
+    """Send the loader's warnings (a malformed JSONL line, an empty file) to stderr.
+
+    ``--json`` promises a stdout that parses; the loader prints its warnings on its
+    own module-level console, which writes to stdout. The console is swapped for the
+    duration of the load and always put back.
+    """
+    if not enabled:
+        yield
+        return
+    from soup_cli.data import loader
+
+    saved = loader.console
+    loader.console = Console(stderr=True)
+    try:
+        yield
+    finally:
+        loader.console = saved
 
 
 def _render_summary_table(report: CleanReport) -> None:
@@ -120,7 +142,8 @@ def clean(
         raise typer.Exit(1)
 
     try:
-        data = load_raw_data(file_path)
+        with _loader_warnings_to_stderr(json_output):
+            data = load_raw_data(file_path)
     except Exception as exc:
         console.print(f"[red]Failed to load dataset:[/] {for_terminal(str(exc))}")
         raise typer.Exit(1) from exc

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -52,7 +53,8 @@ def rewind(
     top: int = typer.Option(
         10,
         "--top",
-        help="How many rows to list for the detailed step.",
+        min=1,
+        help="How many rows to list for the detailed step (at least 1).",
     ),
     json_path: Optional[str] = typer.Option(
         None,
@@ -178,7 +180,9 @@ def rewind(
             )
             raise typer.Exit(1)
 
-    rows = rewind_utils.rank_rows(run, detail_step)[:top]
+    ranked_rows = rewind_utils.rank_rows(run, detail_step)
+    non_finite = sum(1 for ranked in ranked_rows if not math.isfinite(ranked.loss))
+    rows = ranked_rows[:top]
     previews = None
     if not no_preview and rows:
         previews = _row_previews(target, run, rows, rewind_utils)
@@ -204,12 +208,27 @@ def rewind(
 
     if rows:
         worst = rows[0]
-        console.print(
-            f"row {worst.row}: {worst.share:.0%} of step {detail_step}'s loss, "
-            f"{worst.tokens:,} tokens"
-        )
-        if worst.share >= 0.5:
+        if not math.isfinite(worst.loss):
+            # rank_rows lists non-finite rows first. A non-finite loss carries no
+            # share, so the "N% of the step's loss" headline would name a finite
+            # row and send the reader to the wrong one.
+            console.print(
+                f"row {worst.row}: loss is non-finite ({_fmt_loss(worst.loss)}) in step "
+                f"{detail_step}, {worst.tokens:,} tokens"
+            )
+            if non_finite > 1:
+                console.print(
+                    f"{non_finite} rows in this step are non-finite; the table lists "
+                    "them first."
+                )
             console.print("Inspect or drop this row, then retrain.")
+        else:
+            console.print(
+                f"row {worst.row}: {worst.share:.0%} of step {detail_step}'s loss, "
+                f"{worst.tokens:,} tokens"
+            )
+            if worst.share >= 0.5:
+                console.print("Inspect or drop this row, then retrain.")
 
     if json_path is not None:
         payload = {
