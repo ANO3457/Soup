@@ -653,7 +653,7 @@ HttpOnly session cookie and redirects, as described below, so the address bar
 ends up clean and a reload or a new tab stays signed in. Your browser's history
 still records the URL it was given.
 
-> **v0.75.0 and v0.75.1: add the token to the URL yourself.** In these two
+> **v0.75.0 through v0.75.2: add the token to the URL yourself.** In these
 > releases the tab `soup ui` opens carries no token, so it shows
 > `Error loading dashboard: Unauthorized` and no page can load data (#1194).
 > Open `http://127.0.0.1:<PORT>/?token=<TOKEN>` instead, with the port from
