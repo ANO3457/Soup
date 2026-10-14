@@ -184,3 +184,56 @@ class TestStreamedDecoderSkipsTieDiscovery:
         assert len(fast_grads) == len(slow_grads)
         for fast, slow in zip(fast_grads, slow_grads):
             assert torch.equal(fast, slow)
+
+
+def _one_tie_among_untied():
+    import torch.nn as nn
+
+    class _Inner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.pre = nn.Linear(4, 4, bias=False)
+            self.first = nn.Linear(4, 4, bias=False)
+            self.second = nn.Linear(4, 4, bias=False)
+            self.second.weight = self.first.weight  # the one tie
+            self.post = nn.Linear(4, 4, bias=False)
+
+        def forward(self, x):
+            return self.post(self.second(self.first(self.pre(x))))
+
+    torch.manual_seed(0)
+    resident = _Inner()
+    with torch.device("meta"):
+        meta = _Inner()
+    return resident, meta
+
+
+class TestOneTieAmongUntiedWeights:
+    """Every other fixture has a single tensor group, so a detector that asked
+    whether ALL groups were tied would pass them; a real layer mixes one tied pair
+    with untied weights."""
+
+    def test_the_detector_sees_the_tie(self):
+        from soup_cli.utils.layer_stream_runtime import _substituted_names_are_tied
+
+        resident, _meta = _one_tie_among_untied()
+        assert (
+            _substituted_names_are_tied(resident, ["pre.weight", "first.weight", "post.weight"])
+            is True
+        )
+
+    def test_the_streamed_layer_matches_the_resident_one(self):
+        from soup_cli.utils.layer_stream_runtime import _layer_name_map
+
+        resident, meta = _one_tie_among_untied()
+        name_map = _layer_name_map(meta)
+        # named_parameters() de-duplicates, so the tied twin is not in name_map.
+        assert sorted(name_map) == ["first.weight", "post.weight", "pre.weight"]
+        params = dict(resident.named_parameters())
+        buffers = {name: params[name].detach().clone() for name in name_map}
+        layer = _wrap(meta, name_map, buffers)
+
+        assert layer._tie_weights is True
+        x = torch.randn(2, 4, generator=torch.Generator().manual_seed(1))
+        with torch.no_grad():
+            assert torch.equal(layer(x), resident(x))
