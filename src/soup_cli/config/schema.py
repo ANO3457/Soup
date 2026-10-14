@@ -3656,6 +3656,23 @@ class TrainingConfig(BaseModel):
             "until it is measured across shapes."
         ),
     )
+    stream_nf4_scale_cache: bool = Field(
+        default=False,
+        description=(
+            "Keep each streamed NF4 weight's expanded fp32 block scales on the "
+            "compute device after its first use. A double-quantised weight stores "
+            "its scales as 8-bit codes plus a nested scale and offset, and "
+            "bitsandbytes' dequantise + linear path expands them on every visit "
+            "(forward and checkpoint recompute): two extra kernels and a "
+            "temporary per projection. The base is frozen, so the expansion is "
+            "done once per (layer, weight) and reused; results are bit-identical. "
+            "Costs 4 bytes per 64-element block of VRAM for the whole run (416 "
+            "MiB on Mistral-7B), which the pre-flight charges up front. "
+            "bitsandbytes' fused 4-bit GEMM path expands the scales inside its "
+            "kernel and is left unchanged. Needs quantization='4bit' with "
+            "double quantization (the default). Off by default."
+        ),
+    )
     stream_disk_kind: Optional[Literal["nvme", "ssd", "hdd"]] = Field(
         default=None,
         description=(
@@ -6561,6 +6578,7 @@ class SoupConfig(BaseModel):
                 or tcfg.stream_read_ahead != DEFAULT_STREAM_READ_AHEAD
                 or tcfg.stream_vram_override is not None
                 or tcfg.stream_vram_probe
+                or tcfg.stream_nf4_scale_cache
                 or tcfg.stream_disk_kind is not None
                 or tcfg.stream_pin is not None
             ):
@@ -6568,11 +6586,24 @@ class SoupConfig(BaseModel):
                     "training.stream_source / training.stream_ngram_source / "
                     "training.stream_buffers / training.stream_read_ahead / "
                     "training.stream_vram_override / training.stream_vram_probe "
-                    "/ training.stream_disk_kind / training.stream_pin set but "
-                    "stream_layers is false; set stream_layers=true to stream the "
-                    "base layer-by-layer."
+                    "/ training.stream_nf4_scale_cache / training.stream_disk_kind "
+                    "/ training.stream_pin set but stream_layers is false; set "
+                    "stream_layers=true to stream the base layer-by-layer."
                 )
             return self
+        if tcfg.stream_nf4_scale_cache and (
+            tcfg.quantization != "4bit" or not tcfg.double_quant_on
+        ):
+            # The cache holds the EXPANDED nested scales. Without 4-bit there is
+            # no NF4 weight, and without double quantisation the stored scales
+            # are already fp32, so the setting would reach nothing.
+            raise ValueError(
+                "training.stream_nf4_scale_cache needs quantization='4bit' with "
+                "double quantization (training.bnb_4bit_use_double_quant unset or "
+                f"true); got quantization={tcfg.quantization!r}, "
+                f"bnb_4bit_use_double_quant={tcfg.bnb_4bit_use_double_quant!r}. "
+                "Without them there are no nested NF4 scales to cache."
+            )
         # #971 — `stream_source: 'ram'` INSISTS on the RAM tier: 'ram' insists,
         # 'disk' forces, 'auto' falls back (trainer/stream_setup.py). The
         # read-ahead reader belongs to the NVMe disk tier, so a non-default
