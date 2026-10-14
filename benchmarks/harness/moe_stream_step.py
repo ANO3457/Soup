@@ -96,6 +96,10 @@ def main(argv=None):
         report["shard_seconds"] = _shard(args)
     index = read_shard_index(args.store)
     report["store_bytes"] = shard_cache_disk_bytes(args.store, index)
+    # What the store holds, not what was asked for: an existing store is reused.
+    report["store_expert_layout"] = index.expert_layout or "fused"
+    report["store_quant"] = index.quant
+    report["store_double_quant"] = bool(index.double_quant)
     lora = LoraConfig(
         r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0, bias="none",
         target_modules=_ATTENTION, task_type=TaskType.CAUSAL_LM,
@@ -120,17 +124,24 @@ def main(argv=None):
             ids = torch.randint(0, vocab, (args.batch, args.seq), generator=generator).cuda()
             before = runtime.stats()
             torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
             tick = time.perf_counter()
             loss = model(input_ids=ids, labels=ids).loss
             loss.backward()
+            torch.cuda.synchronize()
+            seconds_to_grads = time.perf_counter() - tick
+            # Checked here, before the optimizer consumes and zeroes the grads.
+            grads = [param.grad for param in trainable]
+            grads_present = sum(grad is not None for grad in grads)
+            grads_finite = grads_present > 0 and all(
+                bool(torch.isfinite(grad).all()) for grad in grads if grad is not None
+            )
+            tick_opt = time.perf_counter()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
-            seconds = time.perf_counter() - tick
+            seconds = seconds_to_grads + (time.perf_counter() - tick_opt)
             after = runtime.stats()
-            grads_finite = all(
-                param.grad is None or bool(torch.isfinite(param.grad).all()) for param in trainable
-            )
             report["steps"].append(
                 {
                     "step": step,
@@ -139,12 +150,15 @@ def main(argv=None):
                     "loss": float(loss.detach()),
                     "loss_finite": bool(torch.isfinite(loss.detach())),
                     "grads_finite": grads_finite,
+                    "grads_present": grads_present,
                     "expert_fetches": after["expert_fetches"] - before["expert_fetches"],
                     "expert_bytes_read": after["expert_bytes_read"] - before["expert_bytes_read"],
                     "layer_loads": after["layer_loads"] - before["layer_loads"],
+                    # This step's peaks (reset at its start); the host figure is the
+                    # process's peak working set so far (Windows ``peak_wset``).
                     "peak_vram_mib": torch.cuda.max_memory_allocated() // 2**20,
                     "peak_reserved_mib": torch.cuda.max_memory_reserved() // 2**20,
-                    "peak_host_bytes": _peak_host_bytes(),
+                    "peak_host_bytes_so_far": _peak_host_bytes(),
                 }
             )
             print(json.dumps(report["steps"][-1]))
