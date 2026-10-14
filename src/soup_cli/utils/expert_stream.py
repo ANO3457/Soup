@@ -39,6 +39,10 @@ EXPERT_PARTS = (GATE_UP, DOWN)
 #: in per-layer experts files instead of inside the decoder-layer file.
 EXPERT_LAYOUT_PER_EXPERT = "per_expert"
 _MAX_EXPERTS = 4096
+#: One expert's stored bytes may not exceed this: the reader allocates its staging
+#: from the header, so an unbounded header would size an unbounded allocation. A
+#: Kimi K2 expert is ~25 MB at NF4, ~88 MB at bf16.
+_MAX_EXPERT_BYTES = 2**30
 
 
 def expert_key(expert: int, part: str) -> str:
@@ -174,8 +178,13 @@ class ExpertShardReader:
     when the platform has it, so a store far larger than RAM does not churn the
     page cache of the whole box; buffered reads otherwise.
 
-    The handle stays open for the reader's life, which on Windows also keeps
-    the file from being replaced underneath the offsets read from its header.
+    The file is opened once, here, and the header is read through the same
+    file identity, so a file swapped between the header read and the first
+    fetch is refused, not read at stale offsets. The handle stays open for the
+    reader's life, which on Windows also keeps the file from being replaced.
+    Every stored tensor's size is checked against the index (dense shape, NF4
+    spec), so a header-valid file cannot steer a read or a dequantisation past
+    the bytes it really holds.
     """
 
     def __init__(
@@ -189,18 +198,35 @@ class ExpertShardReader:
         direct: bool = True,
     ) -> None:
         from soup_cli.utils.layer_stream_runtime import quant_sidecar_keys
-        from soup_cli.utils.safetensors_reader import aligned_span, read_header
+        from soup_cli.utils.safetensors_reader import (
+            aligned_span,
+            identity_of,
+            read_header_with_identity,
+        )
 
         if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= _MAX_EXPERTS:
             raise ValueError(f"expert count must be an int in [1, {_MAX_EXPERTS}], got {count!r}")
         self.path = path
         self.count = count
-        self.shapes = {part: tuple(shapes[part]) for part in EXPERT_PARTS}
+        self.shapes = {part: _checked_shape(part, shapes[part]) for part in EXPERT_PARTS}
         self.quant_specs = dict(quant_specs)
         self.dtype = dtype
+        self.direct = direct
+        self._handle: Optional[Any] = None
         name = os.path.basename(path)
-        header = read_header(path)
-        self._size = os.path.getsize(path)
+        handle = self._open()
+        header, identity = read_header_with_identity(path)
+        if identity_of(handle) != identity:
+            self.close()
+            raise ValueError(f"experts file {name} changed while it was being opened")
+        self._size = identity.size
+        expected = {
+            part: _expected_tensors(
+                expert_key(0, part), self.shapes[part], self.quant_specs.get(part)
+            )
+            for part in EXPERT_PARTS
+        }
+        stored_dtype = _stored_torch_dtype(dtype)
         #: per expert: ((tensor name, entry), ...)
         self._entries: list = []
         largest = 0
@@ -210,34 +236,49 @@ class ExpertShardReader:
                 key = expert_key(expert, part)
                 spec = self.quant_specs.get(part)
                 wanted = quant_sidecar_keys(key, spec) if spec is not None else (key,)
-                for tensor_name in wanted:
+                for tensor_name, (want_shape, want_dtype) in zip(wanted, expected[part]):
                     entry = header.get(tensor_name)
                     if entry is None:
+                        self.close()
                         raise ValueError(
                             f"experts file {name} has no tensor {tensor_name!r} "
                             f"— reshard the checkpoint"
                         )
-                    _stored_torch_dtype(entry.dtype)
+                    got_dtype = _stored_torch_dtype(entry.dtype)
+                    if want_dtype is None:
+                        want_dtype = stored_dtype
+                    if tuple(entry.shape) != want_shape or got_dtype != want_dtype:
+                        self.close()
+                        raise ValueError(
+                            f"experts file {name}: {tensor_name!r} is {entry.dtype} "
+                            f"{tuple(entry.shape)}, the index expects {want_dtype} "
+                            f"{want_shape} — reshard the checkpoint"
+                        )
+                    if entry.start % got_dtype.itemsize:
+                        self.close()
+                        raise ValueError(
+                            f"experts file {name}: {tensor_name!r} is not aligned to its dtype"
+                        )
                     entries.append((tensor_name, entry))
-                if spec is None and tuple(header[key].shape) != self.shapes[part]:
-                    raise ValueError(
-                        f"experts file {name}: {key!r} has shape "
-                        f"{tuple(header[key].shape)}, expected {self.shapes[part]}"
-                    )
             need = 0
             for _, entry in entries:
                 lo, hi = aligned_span(entry.start, entry.end)
                 need += hi - lo
+            if need > _MAX_EXPERT_BYTES:
+                self.close()
+                raise ValueError(
+                    f"experts file {name}: expert {expert} needs {need} bytes, over the "
+                    f"{_MAX_EXPERT_BYTES}-byte limit for one expert"
+                )
             largest = max(largest, need)
             self._entries.append(tuple(entries))
-        if expert_key(count, GATE_UP) in header:
+        if expert_key(count, GATE_UP) in header or expert_key(count, DOWN) in header:
+            self.close()
             raise ValueError(
                 f"experts file {name} holds more than {count} experts — reshard the checkpoint"
             )
         #: Staging bytes one expert needs (each tensor's span on sector bounds).
         self.max_span = largest
-        self.direct = direct
-        self._handle: Optional[Any] = None
         self.fetches = 0
         self.bytes_read = 0
 
@@ -286,6 +327,49 @@ class ExpertShardReader:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - best effort at interpreter teardown
+            pass
+
+
+def _checked_shape(part: str, shape: Any) -> Tuple[int, ...]:
+    dims = tuple(int(dim) for dim in shape)
+    if len(dims) != 2 or any(dim < 1 for dim in dims) or dims[0] * dims[1] > 2**31:
+        raise ValueError(f"expert {part} shape must be two positive dims, got {tuple(shape)!r}")
+    return dims
+
+
+def _expected_tensors(key: str, shape: Tuple[int, int], spec: Any) -> Tuple[Tuple[Any, Any], ...]:
+    """(shape, torch dtype) of every stored tensor of one expert matrix, in the
+    order ``quant_sidecar_keys`` names them. ``None`` dtype = the stream dtype.
+
+    NF4 (bitsandbytes ``quantize_4bit``): packed nibbles ``[ceil(n/2), 1]`` uint8,
+    one absmax per ``blocksize`` weights (fp32, or uint8 codes under double
+    quantisation with an fp32 ``nested_absmax`` per ``nested_blocksize`` and a
+    scalar fp32 ``nested_offset``).
+    """
+    import torch
+
+    if spec is None:
+        return ((shape, None),)
+    if tuple(int(dim) for dim in spec.shape) != shape:
+        raise ValueError(f"{key}: NF4 spec shape {tuple(spec.shape)} is not the index's {shape}")
+    nested_ok = not spec.nested or int(spec.nested_blocksize) >= 1
+    if not 1 <= int(spec.blocksize) <= 4096 or not nested_ok:
+        raise ValueError(f"{key}: NF4 spec has an impossible block size")
+    weights = shape[0] * shape[1]
+    blocks = -(-weights // int(spec.blocksize))
+    out = [(((weights + 1) // 2, 1), torch.uint8)]
+    if spec.nested:
+        out.append(((blocks,), torch.uint8))
+        out.append(((-(-blocks // int(spec.nested_blocksize)),), torch.float32))
+        out.append(((), torch.float32))
+    else:
+        out.append(((blocks,), torch.float32))
+    return tuple(out)
 
 
 def aligned_staging(size: int) -> Tuple[Any, Any]:

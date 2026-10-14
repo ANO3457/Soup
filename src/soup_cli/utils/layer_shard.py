@@ -698,7 +698,12 @@ def read_shard_index(out_dir: str, *, index_name: str = _INDEX_NAME) -> ShardInd
         for part, shape in (payload.get("expert_shapes") or {}).items()
     }
     if bool(expert_layers) != (expert_layout == EXPERT_LAYOUT_PER_EXPERT) or (
-        expert_layers and (expert_count < 1 or set(expert_shapes) != {"gate_up", "down"})
+        expert_layers
+        and (
+            not 1 <= expert_count <= 4096
+            or set(expert_shapes) != {"gate_up", "down"}
+            or any(len(shape) != 2 or min(shape) < 1 for shape in expert_shapes.values())
+        )
     ):
         raise ValueError("the index's expert fields do not describe one layout")
     return ShardIndex(
