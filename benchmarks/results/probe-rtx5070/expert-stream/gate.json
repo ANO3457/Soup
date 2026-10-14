@@ -1,0 +1,211 @@
+{
+  "box": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "time_utc": "2026-10-14T18:36:59Z",
+    "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "gpu_free_mib": 7013,
+    "gpu_total_mib": 8123,
+    "transformers": "5.17.0",
+    "bitsandbytes": "0.50.2",
+    "safetensors": "0.8.0"
+  },
+  "args": {
+    "model_dir": "C:/Users/user/.cache/huggingface/hub/models--allenai--OLMoE-1B-7B-0924/snapshots/6d84c48581ece794365f2b8e9cfb043c68ade9c5",
+    "scratch": "D:/soup-bench/expert-gate",
+    "out": "benchmarks/results/probe-rtx5070/expert-stream/gate.json",
+    "layers": [
+      0,
+      7,
+      15
+    ],
+    "tokens": 512,
+    "cells": [
+      "cpu-fp32",
+      "cuda-bf16",
+      "cuda-bf16-nf4"
+    ]
+  },
+  "layers": {
+    "0": {
+      "cpu-fp32": {
+        "resident_seconds": 0.3855,
+        "streamed_seconds": 1.7051,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16": {
+        "resident_seconds": 6.112,
+        "streamed_seconds": 1.4454,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16-nf4": {
+        "resident_seconds": 0.135,
+        "streamed_seconds": 0.8436,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      }
+    },
+    "7": {
+      "cpu-fp32": {
+        "resident_seconds": 0.3383,
+        "streamed_seconds": 1.8237,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16": {
+        "resident_seconds": 0.1715,
+        "streamed_seconds": 1.2907,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16-nf4": {
+        "resident_seconds": 0.0776,
+        "streamed_seconds": 0.6355,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      }
+    },
+    "15": {
+      "cpu-fp32": {
+        "resident_seconds": 0.3544,
+        "streamed_seconds": 1.6883,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16": {
+        "resident_seconds": 0.1065,
+        "streamed_seconds": 0.9699,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      },
+      "cuda-bf16-nf4": {
+        "resident_seconds": 0.1031,
+        "streamed_seconds": 0.6382,
+        "output": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_input": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "grad_routing": {
+          "equal": true,
+          "max_abs_diff": 0.0
+        },
+        "experts_hit": 64,
+        "fetches": 128,
+        "fetches_ok": true
+      }
+    }
+  },
+  "verdict": "PASS"
+}
