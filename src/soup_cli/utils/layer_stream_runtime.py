@@ -3024,7 +3024,7 @@ def install_streaming(
         layers, decoder_paths, layer_specs, layer_buffer_keys(getattr(index, "arch", ""))
     )
 
-    large_source_indices ={key: n_layers + offset for offset, key in enumerate(large_keys)}
+    large_source_indices = {key: n_layers + offset for offset, key in enumerate(large_keys)}
     source_specs = needed_specs_by_layer + [{key: large_specs[key]} for key in large_keys]
     source_paths = list(decoder_paths) + [large_shard_path(shard_dir, key) for key in large_keys]
     placement = tuple(getattr(index, "layer_roots", ()) or ())
