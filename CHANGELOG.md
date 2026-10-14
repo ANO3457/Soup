@@ -12,6 +12,42 @@ reproducing 70+ versions of notes.
 
 ## [Unreleased]
 
+## [0.76.1] - 2026-10-14
+
+### Changed
+
+- **The README and the performance docs now state the 8B NF4 figure with its SM clock and give the post-#331 row, and no longer say the re-measurement is pending (#1207, in #1699).** Llama-3.1-8B-Instruct NF4 on an RTX 3050 Laptop 4 GB reads **119.6 tok/s at 952 MHz in a 3.32 GB peak** before the #331 repair and **208.6 tok/s at 1935–1957 MHz in a 2.40 GB peak** after it, the second row measured by @umran666 (#1103). The two are not directly comparable: 59% against 68% of the same-session GEMM ceiling is about 14% slower per unit clock, so the raw 1.74x gain is the clock, not a speedup, and large-layer streaming changed the memory pattern between the rows, so even the fraction is not like-for-like. Changed: the headline, the GIF alt text and caption and the preprint bullet (Citing Soup) in `README.md`, and the table row, the headline and the large-layer paragraph in `docs/performance-and-quantization.md`. The four README translations (`README.tr.md`, `README.ar.md`, `README.ja.md`, `README.zh.md`) carry the same sentences, with every number, link and code span kept identical, and are re-stamped; their prose is a machine-assisted draft for the translation maintainers to polish. The preprint (DOI 10.5281/zenodo.21771064) is not edited in place; #1207 tracks its amendment as a new version.
+
+- **The "What's New" block of `README.tr.md`, `README.ar.md`, `README.ja.md` and `README.zh.md`
+  now describes v0.76.0 (#1825).** All four still described v0.75.0. The new text follows the
+  block in `README.md` bullet by bullet, with every inline code span, command, flag, config key,
+  URL, link target, number and benchmark file name kept identical; the prose is a machine-assisted
+  draft for the translation maintainers to polish. This change moves no `synced-from` stamp,
+  because the section is exempt from them; the stamps of the four files were re-taken by #1699 in
+  the same release.
+
+- soup.yaml and every other YAML file Soup reads go through one loader that applies the same nesting and expansion limits (100 levels of nesting; one node per source byte plus 10,000 for anchors, aliases and merge keys, with merge keys chained at most 100 levels), and each reader keeps its own size cap: 1 MiB for the training-config readers and for readers that had no cap before, 256 KiB for recipes, `export --quant-config` files, RA-DIT configs and sweep files, 5 MiB for agent specs, 16 MiB for can manifests, 64 KiB for README frontmatter, 4 MiB for the config read by `soup ship`. A soup.yaml that is over a limit, cannot be read or is not valid YAML is refused with one line naming the file and the problem; the other readers report through their own handlers. The audit log now finds credential options from the command tree and also masks long options by name, so the values of `--slack-url` and `--discord-url` are masked and `--min-tokens`, a length threshold, is no longer masked (#1827).
+
+- **The Typer floor is `typer>=0.15.4`, and one CI cell now starts the CLI on the declared Typer
+  and Click floors (#1858).** `typer>=0.9.0` was declared while no command could run below Typer
+  0.12.4: the command tree did not build (`RuntimeError: Type not yet supported: int | None`), so
+  `soup --help` and `soup version` failed with everything else. Typer 0.12.4 - 0.15.3 start the
+  CLI only next to Click 8.1 or older and do not ask for it, so a resolver paired them with a
+  Click on which every help page raised. 0.15.4 is the lowest Typer that works with any Click it
+  can be installed with; `click>=8.0.0` was measured again and holds. A fresh install is
+  unchanged, since a resolver already picks the newest Typer. An environment that holds an older
+  Typer now has it upgraded, or the conflict named, at install time, where before the install
+  succeeded and the first command failed; `soup doctor` reports such a Typer as outdated. The
+  `transformers-floor` CI job installs exactly the two declared floors, builds the command tree,
+  renders every help page and runs `soup version` under them, and a test fails when a declared
+  floor and that job's pin differ (#1802).
+
+### Fixed
+
+- **`task: dpo`, `ipo`, `bco` and `preference` train on the bundled DPO examples again.** Both files (`examples/data/dpo_sample.jsonl`, `examples/data/chat_preferences.jsonl`) and any dataset written the same way, a string `prompt` beside `chosen` / `rejected` message lists that repeat the user turn, failed inside trl after the model had loaded, with an error that changed with `PYTHONHASHSEED` (`'list' object has no attribute 'endswith'`, or a `TypeError`). The `dpo` and `kto` converters now hand the trainer every preference row in one layout: all strings, or all message lists with the prompt turns in `prompt` only. `reward_model` no longer trains on a text with the question in it twice, and `orpo` and `simpo` prepare the same tokens as before. A row that cannot be written that way (one answer a string and the other a message list, a malformed message, no prompt to be found) is dropped at load with a reason that names the field, and a dataset that mixes text rows with conversational ones loads as conversations, with a note. A string `prompt` beside message-list answers is not read when the two answers share leading turns: those turns are the prompt, as `orpo` and `simpo` already read such a row, so a question written only in that string has to be in the conversations as well (#1849 by @dryn85-max in #1866).
+
+- A single-string `data.train` that names a Hub dataset with a dot in its name (`teknium/OpenHermes-2.5`, `org/name.v1`) is now loaded from the Hub instead of failing with `Data file not found`: the loader read the dot as a file extension. A single string now takes the same route as the same name inside a `data.train` list: a supported file extension (`.jsonl`, `.json`, `.csv`, `.parquet`, `.txt`) means a local file, a `://` string a remote URI, anything else a Hub id. A path with an unsupported suffix that does not exist (a typo such as `data/train.jsnol`) therefore goes to the Hub lookup too, instead of `Data file not found`, while an existing file with an unsupported suffix (`data.tsv`) still gets `Unsupported file format` (#1889).
+
 ## [0.76.0] - 2026-10-12
 
 ### Added
@@ -6685,7 +6721,8 @@ what a fine-tune forgets and leaks.
   `SECURITY.md` (~220 KB). `SECURITY.md` is now a concise security policy; the
   detailed hardening notes remain in git history and the GitHub Releases notes.
 
-[Unreleased]: https://github.com/MakazhanAlpamys/Soup/compare/v0.76.0...HEAD
+[Unreleased]: https://github.com/MakazhanAlpamys/Soup/compare/v0.76.1...HEAD
+[0.76.1]: https://github.com/MakazhanAlpamys/Soup/compare/v0.76.0...v0.76.1
 [0.76.0]: https://github.com/MakazhanAlpamys/Soup/compare/v0.75.2...v0.76.0
 [0.75.2]: https://github.com/MakazhanAlpamys/Soup/compare/v0.75.1...v0.75.2
 [0.75.1]: https://github.com/MakazhanAlpamys/Soup/compare/v0.75.0...v0.75.1

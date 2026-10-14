@@ -91,53 +91,36 @@ infrastructure instead of improving models. Soup fixes that.
 
 ## What's New
 
-**v0.76.0 — settings Soup accepted and never applied now stop the load.** Options that were
-validated and documented, and read by nothing on the path they claimed to configure, are now
-refused at load, naming the setting and what to change; the rest warn and name the release
-that will refuse them. A config that loaded before can stop loading: run
-`soup doctor --config soup.yaml` first.
+**v0.76.1 — a patch: the bundled DPO examples train again, and every YAML file Soup reads has
+the same limits.** Everything in v0.76.0 is unchanged. That release refuses settings Soup
+accepted and never applied, so a config that loaded before can stop loading: coming from
+0.75.x, run `soup doctor --config soup.yaml` first. Its feature list is in the
+[v0.76.0 release notes](https://github.com/MakazhanAlpamys/Soup/releases/tag/v0.76.0). The
+settings that only warn at load are refused from v0.77, which also removes
+`soup export --format awq` and `--format gptq`.
 
-- **Breaking: a setting that never took effect is refused at load.** Among them
-  `training.quantization_aware: true` (it never ran quantization-aware training),
-  `training.use_longlora`, `training.ebft_variant`, `training.gdpo_variant`,
-  `training.rope_scaling_type` where no setup reads it, `freeze_layers` / `freeze_ratio`
-  outside the text `sft` / `tts` path on the transformers backend, `auto_mixed_precision`
-  outside `sft` / `tts`, and `backend: unsloth` on seven further tasks that have no unsloth
-  setup. Each message names the field and what to change. `lr_groups`, `early_stop_patience`,
-  `forgetting_eval_steps` and other unread knobs warn at load now and are refused from v0.77.
-- **Validation loss is now evaluated.** `data.val_split` held rows out of training on every
-  run, and no trainer on the transformers backend evaluated them. Every task that gets a
-  split now evaluates it at the end of each epoch, or every N steps with `training.eval_steps`,
-  and records the val loss; runs take a few percent longer. **Breaking for `grpo`, `ppo` and
-  `online_dpo`:** by default they no longer hold rows out (`data.val_split` is ignored with
-  a note), so every row trains.
-- **Breaking: every non-standard `grpo_variant` applies the `grpo_beta` KL penalty.** `gspo`,
-  `dapo`, `dr_grpo`, `bnpo`, `two_sided` and `rft` validated `grpo_beta` and dropped it, so
-  existing variant configs will not reproduce prior runs. `grpo_beta: 0` now runs KL-free and
-  skips the reference forward pass.
-- **Layer streaming reads its disk tier on a background thread, through direct I/O, and can
-  stripe it across NVMe drives.** On a 36 GB 70B-shaped NF4 store larger than RAM (one RTX 5070
-  Laptop 8 GB box), a cold step went from 110.5 s on the synchronous read to 16.2-17.3 s, and
-  from 17.4 s to 9.97 s across two drives with `SOUP_LAYER_STREAM_STRIPE_DIRS` (a sustained-load
-  probe: two rounds, 1.28x and 1.41x, no formal verdict;
-  [record](benchmarks/probe-rtx5070-two-drive-sustained.md)). A store that fits RAM is still
-  faster on the RAM tier, which `stream_source: auto` picks. Opt-in (`stream_layers: true`) and
-  still BETA; records: [direct I/O](benchmarks/gate-974-disk-tier-direct-io.md),
-  [striping](benchmarks/gate-two-drive-striping.md).
-- **New commands and options.** `soup adapters check` scans a LoRA adapter for silent failure;
-  `soup bench train` trains a fixed number of steps and exits 1 when the model was not training
-  (it covers `task: sft` on the transformers backend; `soup bench` is now a group, and
-  `soup bench infer` is the old inference benchmark);
-  `soup data clean` sanitizes and repairs a dataset without touching the input file;
-  `soup recipes verify` checks on the meta device, with no weights downloaded, that every shipped
-  recipe can attach a LoRA adapter; `soup rewind` names the dataset rows behind a loss spike.
-  `soup infer` gains opt-in `--batch-size` and an experimental `--cuda-graphs` (PyTorch 2.14 or
-  newer; on one RTX 5070 Laptop, unpinned, Qwen2.5-1.5B in FP16, the slowest run with it decoded
-  2.9x faster than the fastest without). `soup ab` runs a two-sided, variance-robust test, and
-  `soup adapters sign --backend sigstore` and `soup attest emit --sign sigstore` sign with
-  Sigstore keyless OIDC (`pip install "soup-cli[sigstore]"`).
-- **Deprecated:** `soup export --format awq` and `--format gptq` will be removed in v0.77; both
-  upstream projects are archived and neither extra installs next to `[train]`.
+- **The bundled DPO examples train again.** `task: dpo`, `ipo`, `bco` and `preference` failed
+  inside trl, after the model had loaded, on `examples/data/dpo_sample.jsonl`,
+  `examples/data/chat_preferences.jsonl` and any dataset written the same way (a string
+  `prompt` beside `chosen` / `rejected` message lists), with an error that changed with
+  `PYTHONHASHSEED`. Every preference row now reaches the trainer in one layout, and a row that
+  cannot be written that way is dropped at load with a reason that names the field.
+- **One YAML loader, with limits, for every file Soup reads.** `soup.yaml` and the other YAML
+  readers share a nesting limit (100 levels) and an expansion limit, and each keeps its own
+  size cap (1 MiB for a `soup.yaml`). A file over a limit, unreadable or not valid YAML is
+  refused with one line naming the file and the problem. The audit log masks credential
+  options by name.
+- **The Typer floor is `typer>=0.15.4`.** `typer>=0.9.0` was declared while no command could
+  start below Typer 0.12.4, and 0.12.4 - 0.15.3 started only next to Click 8.1 or older. An
+  environment with an older Typer now has it upgraded, or the conflict named, at install time;
+  `soup doctor` reports it. A fresh install is unchanged, and one CI cell now starts the CLI on
+  the declared Typer and Click floors.
+- **A Hub dataset id with a dot loads from the Hub.** `data.train: teknium/OpenHermes-2.5`
+  failed with `Data file not found`: the loader read the dot as a file extension.
+- **Docs.** The README and the performance docs state the 8B NF4 figure with its SM clock
+  (119.6 tok/s at 952 MHz) beside the post-#331 row (208.6 tok/s at 1935-1957 MHz,
+  [#1207](https://github.com/MakazhanAlpamys/Soup/issues/1207) tracks the preprint
+  amendment), and the What's New of the four translations describes v0.76.0.
 
 > Python **3.10–3.12** only. On 3.13+, pip used to resolve untested PyTorch wheels that
 > crash in the native extension before Soup runs at all.
