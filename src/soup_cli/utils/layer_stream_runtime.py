@@ -1379,6 +1379,25 @@ class StreamPrefetcher:
 # ==========================================================================
 # the streamed layer (plan 5.6)
 # ==========================================================================
+def _substituted_names_are_tied(module: Any, names: Any) -> bool:
+    """True when a name in ``names`` shares its tensor with another registered name.
+
+    ``functional_call(tie_weights=True)`` rewrites the mapping only for a GIVEN
+    name whose tensor is registered under more than one name
+    (``torch.nn.utils.stateless._untie_named_tensors_map``); for every other
+    mapping it returns a plain copy. Deciding this once lets the hot path pass
+    ``tie_weights=False`` with an identical result.
+    """
+    wanted = set(names)
+    names_by_tensor: dict = {}
+    for name, tensor in (
+        *module.named_parameters(remove_duplicate=False),
+        *module.named_buffers(remove_duplicate=False),
+    ):
+        names_by_tensor.setdefault(id(tensor), set()).add(name)
+    return any(len(group) > 1 and group & wanted for group in names_by_tensor.values())
+
+
 def _build_streamed_layer_class():
     import torch
     import torch.nn as nn
@@ -1413,6 +1432,12 @@ def _build_streamed_layer_class():
             # pool tensors, so later layer loads update their contents in place.
             self._cached_substitution_buffers = None
             self._cached_substitution_weights = None
+            # functional_call's default tie_weights=True walks every parameter
+            # and buffer of the layer on each call, forward and recompute alike
+            # (~104 us on a PEFT Mistral layer, ~6.7 ms per 32-layer step). The
+            # walk changes nothing unless a substituted name is tied, and
+            # get_peft_model() has already run, so the graph is final here.
+            self._tie_weights = _substituted_names_are_tied(self.inner, self.name_map)
             # v0.72.5 (#331) — a streamed NF4 weight must not reach MatMul4Bit,
             # which captures it outside save_for_backward and so aliases the pool
             # across the checkpoint boundary. See install_dequant_forward.
@@ -1681,6 +1706,7 @@ def _build_streamed_layer_class():
                 self._substituted_weights(buffers),
                 (hidden_states, *args),
                 kwargs,
+                tie_weights=self._tie_weights,
             )
 
     return StreamedDecoderLayer
