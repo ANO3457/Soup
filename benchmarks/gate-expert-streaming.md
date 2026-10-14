@@ -1,6 +1,6 @@
 # Gate: expert-granularity streaming is bit-exact against the resident MoE block
 
-Status: **PASS** (run 2026-10-14 18:36Z). The rule in section 2 was committed in 74f0a08b, before the run.
+Status: **PASS**: first run 2026-10-14 18:36Z (harness at 06fe28f16), re-run at the reviewed tip f5281f96f (2026-10-14T19:04:45Z, after the reader gained its size checks), PASS again. The rule in section 2 was committed in 74f0a08b, before the first run.
 
 ## 1. Question
 
@@ -49,7 +49,7 @@ step routes to 96.7-100% of experts), a whole-model step, any DeepSeek-V3 weight
 - GPU: 0 MiB in use before the run; the harness saw 7,013 of 8,123 MiB free once CUDA was up.
 - Foreign activity: a 32 GB model download writing to D: (this lane's own). No other session ran pytest or used the GPU; the run is a correctness check, so timing noise does not affect the verdict.
 - Software: Python 3.12.10, Windows 11 26200, torch 2.14.0+cu130, transformers 5.17.0, bitsandbytes 0.50.2, safetensors 0.8.0.
-- Harness commit 06fe28f16 (branch `feat/moe-expert-streaming`). Raw JSON: `benchmarks/results/probe-rtx5070/expert-stream/gate.json`.
+- Harness commit 06fe28f16 for the first run; f5281f96f for the re-run, whose JSON is the one committed (`benchmarks/results/probe-rtx5070/expert-stream/gate.json`). Both runs: 27/27 equal, every fetch count 2 x routed.
 
 ## 4. Results
 
