@@ -196,6 +196,123 @@ def test_reader_refuses_a_file_missing_an_expert(tmp_path):
         ExpertShardReader(path, count=2, shapes=info.shapes, quant_specs={}, dtype="float32")
 
 
+def _nf4_spec(shape, nested=False):
+    from soup_cli.utils.layer_shard import NF4WeightSpec
+
+    return NF4WeightSpec(
+        shape=shape, dtype="bfloat16", blocksize=64, quant_type="nf4",
+        nested=nested, nested_blocksize=256 if nested else 0,
+    )
+
+
+def _nf4_file(path, *, packed_bytes, absmax_blocks):
+    """A one-expert NF4 experts file with chosen sidecar sizes (no bitsandbytes)."""
+    import torch
+    from safetensors.torch import save_file
+
+    blob = {}
+    for part, weights in (("gate_up", 6 * 64), ("down", 64 * 3)):
+        n_packed = packed_bytes if part == "gate_up" else weights // 2
+        n_blocks = absmax_blocks if part == "gate_up" else weights // 64
+        blob[f"0.{part}"] = torch.zeros((n_packed, 1), dtype=torch.uint8)
+        blob[f"0.{part}::absmax"] = torch.ones(n_blocks)
+    save_file(blob, str(path))
+    return str(path)
+
+
+def test_reader_accepts_nf4_sidecars_of_exactly_the_spec_size(tmp_path):
+    from soup_cli.utils.expert_stream import ExpertShardReader
+
+    path = _nf4_file(tmp_path / "e.safetensors", packed_bytes=6 * 64 // 2, absmax_blocks=6)
+    specs = {"gate_up": _nf4_spec((6, 64)), "down": _nf4_spec((64, 3))}
+    reader = ExpertShardReader(
+        path, count=1, shapes={"gate_up": (6, 64), "down": (64, 3)},
+        quant_specs=specs, dtype="bfloat16",
+    )
+    reader.close()
+
+
+@pytest.mark.parametrize(
+    ("packed_bytes", "absmax_blocks"), [(16, 6), (6 * 64 // 2, 2)], ids=["packed", "absmax"]
+)
+def test_reader_refuses_nf4_sidecars_smaller_than_the_spec(tmp_path, packed_bytes, absmax_blocks):
+    """The dequantisation reads prod(spec.shape) weights natively without a bounds
+    check, so a header-valid file holding fewer bytes than the spec must be refused
+    before any read (soup-c2's security read of this reader)."""
+    from soup_cli.utils.expert_stream import ExpertShardReader
+
+    path = _nf4_file(
+        tmp_path / "e.safetensors", packed_bytes=packed_bytes, absmax_blocks=absmax_blocks
+    )
+    specs = {"gate_up": _nf4_spec((6, 64)), "down": _nf4_spec((64, 3))}
+    with pytest.raises(ValueError, match="the index expects"):
+        ExpertShardReader(
+            path, count=1, shapes={"gate_up": (6, 64), "down": (64, 3)},
+            quant_specs=specs, dtype="bfloat16",
+        )
+
+
+def test_reader_refuses_an_nf4_spec_that_disagrees_with_the_index_shape(tmp_path):
+    from soup_cli.utils.expert_stream import ExpertShardReader
+
+    path = _nf4_file(tmp_path / "e.safetensors", packed_bytes=6 * 64 // 2, absmax_blocks=6)
+    specs = {"gate_up": _nf4_spec((12, 64)), "down": _nf4_spec((64, 3))}
+    with pytest.raises(ValueError, match="is not the index's"):
+        ExpertShardReader(
+            path, count=1, shapes={"gate_up": (6, 64), "down": (64, 3)},
+            quant_specs=specs, dtype="bfloat16",
+        )
+
+
+def test_reader_refuses_a_dense_dtype_other_than_the_index_dtype(tmp_path):
+    import torch
+
+    from soup_cli.utils.expert_stream import ExpertShardReader, write_expert_shard
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    with pytest.raises(ValueError, match="the index expects torch.bfloat16"):
+        ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="bfloat16")
+
+
+def test_reader_refuses_an_expert_over_the_byte_limit(tmp_path, monkeypatch):
+    import torch
+
+    import soup_cli.utils.expert_stream as expert_stream
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = expert_stream.write_expert_shard(
+        path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False
+    )
+    monkeypatch.setattr(expert_stream, "_MAX_EXPERT_BYTES", 1024)
+    with pytest.raises(ValueError, match="over the 1024-byte limit"):
+        expert_stream.ExpertShardReader(
+            path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32"
+        )
+
+
+def test_reader_refuses_a_file_swapped_while_it_opens(tmp_path, monkeypatch):
+    """The header is read through the identity of the handle the reads use."""
+    import dataclasses
+
+    import torch
+
+    import soup_cli.utils.safetensors_reader as safetensors_reader
+    from soup_cli.utils.expert_stream import ExpertShardReader, write_expert_shard
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    real = safetensors_reader.read_header_with_identity
+
+    def swapped(target):
+        header, identity = real(target)
+        return header, dataclasses.replace(identity, mtime_ns=identity.mtime_ns + 1)
+
+    monkeypatch.setattr(safetensors_reader, "read_header_with_identity", swapped)
+    with pytest.raises(ValueError, match="changed while it was being opened"):
+        ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
+
+
 def test_reader_refuses_a_file_with_more_experts_than_the_index(tmp_path):
     import torch
 
