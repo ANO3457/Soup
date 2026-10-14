@@ -515,11 +515,10 @@ class TestSetupWiring:
 class TestCuda:
     """bitsandbytes' CUDA kernels on the dense path, with and without the cache."""
 
+    @pytest.mark.gpu
     @pytest.mark.parametrize("force_dense", [True, False])
     def test_bit_identical_on_cuda(self, tmp_path, monkeypatch, force_dense):
         torch = pytest.importorskip("torch")
-        if not torch.cuda.is_available():
-            pytest.skip("needs a CUDA device")
         import soup_cli.utils.layer_stream_runtime as runtime_module
 
         if force_dense:
