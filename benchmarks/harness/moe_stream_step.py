@@ -9,12 +9,17 @@ synthetic store every number is "random weights, shape only".
 
     python benchmarks/harness/moe_stream_step.py --store D:/soup-bench/moe-k2-synth \
         --seq 512 --steps 1 --out step.json
+
+With ``--weights`` a real checkpoint is sharded into ``--store`` first (NF4 on
+CUDA, the way ``soup train`` does it: native transformers class, the config's
+layer count, ``--expert-layout``), unless ``--store`` already holds an index.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -23,7 +28,12 @@ _ATTENTION = ["q_proj", "q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj
 
 def _args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--store", required=True, help="shard cache dir holding config.json")
+    parser.add_argument("--store", required=True, help="shard cache dir")
+    parser.add_argument("--weights", default=None, help="checkpoint to shard into --store")
+    parser.add_argument(
+        "--model", default=None, help="dir with config.json (default: --weights, else --store)"
+    )
+    parser.add_argument("--expert-layout", choices=("fused", "per_expert"), default="per_expert")
     parser.add_argument("--out", required=True)
     parser.add_argument("--seq", type=int, default=512)
     parser.add_argument("--batch", type=int, default=1)
@@ -35,6 +45,28 @@ def _args(argv=None):
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--label", default="random weights, shape only")
     return parser.parse_args(argv)
+
+
+def _shard(args):
+    """Shard ``--weights`` into ``--store`` the way the streamed trainer does."""
+    from transformers import AutoConfig
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+    from soup_cli.utils.layer_stream_runtime import build_meta_skeleton, quantised_layer_suffixes
+
+    config = AutoConfig.from_pretrained(args.weights, trust_remote_code=False)
+    probe = build_meta_skeleton(args.weights, dtype="bfloat16", quant="nf4")
+    suffixes = quantised_layer_suffixes(probe)
+    del probe
+    started = time.perf_counter()
+    shard_checkpoint(
+        args.weights, args.store, dtype="bfloat16", arch="deepseek_v3", quant="nf4",
+        quant_suffixes=suffixes, double_quant=True, quant_device="cuda",
+        num_hidden_layers=int(config.num_hidden_layers),
+        expert_layout="" if args.expert_layout == "fused" else "per_expert",
+        notify=print,
+    )
+    return round(time.perf_counter() - started, 1)
 
 
 def _peak_host_bytes():
@@ -51,22 +83,26 @@ def main(argv=None):
     import torch
     from peft import LoraConfig, TaskType
 
-    from soup_cli.utils.layer_shard import read_shard_index
+    from soup_cli.utils.layer_shard import read_shard_index, shard_cache_disk_bytes
     from soup_cli.utils.layer_stream_runtime import build_streamed_model
 
     args = _args(argv)
     if not torch.cuda.is_available():
         print("SKIP: needs CUDA")
         return 0
+    model_dir = args.model or args.weights or args.store
+    report = {"label": args.label, "args": vars(args), "steps": []}
+    if args.weights and not os.path.exists(os.path.join(args.store, "index.json")):
+        report["shard_seconds"] = _shard(args)
     index = read_shard_index(args.store)
+    report["store_bytes"] = shard_cache_disk_bytes(args.store, index)
     lora = LoraConfig(
         r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0, bias="none",
         target_modules=_ATTENTION, task_type=TaskType.CAUSAL_LM,
     )
-    report = {"label": args.label, "args": vars(args), "steps": []}
     started = time.perf_counter()
     model, runtime = build_streamed_model(
-        model_id=args.store, shard_dir=args.store, index=index, lora_config=lora,
+        model_id=model_dir, shard_dir=args.store, index=index, lora_config=lora,
         device="cuda", dtype=index.dtype, buffers=args.buffers, pin=not args.no_pin,
         tier=args.tier, seed=args.seed, quant=index.quant,
         double_quant=bool(index.double_quant),
