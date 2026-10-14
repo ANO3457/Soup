@@ -2768,6 +2768,8 @@ class StreamRuntime:
     total_params: int = 0
     #: Read-only Qwen4 PLE mappings, if the N-gram table is SSD-backed.
     external_sources: Tuple[Any, ...] = ()
+    #: Per MoE layer, the reader of its experts file (expert_layout "per_expert").
+    expert_readers: Tuple[Any, ...] = ()
 
     def close(self) -> None:
         """Release the weight source and detach the prefetch hook.
@@ -2786,6 +2788,8 @@ class StreamRuntime:
             external_close = getattr(external, "close", None)
             if callable(external_close):
                 external_close()
+        for reader in self.expert_readers:
+            reader.close()
         if self.hook is not None:
             self.hook.remove()
             self.hook = None
@@ -2813,6 +2817,8 @@ class StreamRuntime:
             "large_loads": getattr(self.large_pool, "loads", 0),
             "device": self.device,
             "total_params": self.total_params,
+            "expert_fetches": sum(reader.fetches for reader in self.expert_readers),
+            "expert_bytes_read": sum(reader.bytes_read for reader in self.expert_readers),
         }
 
 
@@ -2893,6 +2899,48 @@ def _load_layer_buffers(
     return loaded
 
 
+def _install_expert_streaming(
+    layers: Any,
+    shard_dir: str,
+    index: Any,
+    *,
+    device: str,
+    codes: Optional[Mapping[str, Any]],
+) -> Tuple[Any, ...]:
+    """Swap each MoE layer's experts module for a ``StreamedExperts``.
+
+    Only for a cache sharded with ``expert_layout="per_expert"``; returns the
+    experts-file readers (closed by ``StreamRuntime.close``).
+    """
+    from soup_cli.utils.expert_stream import (
+        EXPERT_LAYOUT_PER_EXPERT,
+        ExpertFetcher,
+        ExpertShardReader,
+        install_expert_streaming,
+    )
+    from soup_cli.utils.layer_shard import expert_paths
+
+    if getattr(index, "expert_layout", "") != EXPERT_LAYOUT_PER_EXPERT:
+        return ()
+    readers: Dict[int, Any] = {}
+    try:
+        for layer, path in expert_paths(shard_dir, index).items():
+            readers[layer] = ExpertShardReader(
+                path,
+                count=index.expert_count,
+                shapes=index.expert_shapes,
+                quant_specs=index.expert_quant_specs,
+                dtype=index.dtype,
+            )
+        fetcher = ExpertFetcher(device=device, dtype=index.dtype, codes=codes)
+        install_expert_streaming(layers, readers, fetcher)
+    except BaseException:
+        for reader in readers.values():
+            reader.close()
+        raise
+    return tuple(readers.values())
+
+
 def install_streaming(
     model: Any,
     *,
@@ -2969,6 +3017,11 @@ def install_streaming(
             f"{index.n_layers} — reshard the checkpoint"
         )
 
+    # Before the name maps: the fused expert parameters leave the layer here,
+    # so the layer pool never allocates them.
+    expert_readers = _install_expert_streaming(
+        layers, shard_dir, index, device=str(device), codes=codes
+    )
     layer_name_maps = [_layer_name_map(layer) for layer in layers]
     if not any(layer_name_maps):
         raise RuntimeError(
@@ -3164,6 +3217,7 @@ def install_streaming(
         large_pool=large_pool,
         hook=handle,
         total_params=int(getattr(index, "total_params", 0) or 0),
+        expert_readers=expert_readers,
         tier=tier,
     )
 
