@@ -1,6 +1,9 @@
 # Probe: one LoRA training step on a Kimi K2-shaped store, RTX 5070 Laptop 8 GB
 
-Status: run 1 (the model's own routing) COMPLETES, see section 4; its step time is NOT a K2 step time (section 4.1). Run 2 (forced uniform routing, the addendum rule in section 2.1) is to follow.
+Status: **COMPLETES**, both runs. Run 1 (the model's own routing) is real but not a K2 step
+time (section 4.1). Run 2 (forced uniform routing, addendum rule in section 2.1 committed in
+1fe403a18 before it ran) read every expert: **one full LoRA step of a 1.026 T-parameter
+K2-shaped model took 868 s cold and 1,109 s next on the 8 GB laptop.** Random weights, shape only.
 
 **Every number in this record is "random weights, shape only".** The store is
 synthetic: the parameter count and tensor shapes of `moonshotai/Kimi-K2-Instruct`
@@ -57,6 +60,10 @@ number: "random weights, shape only; routing forced uniform".
 
 ## 3. Box state
 
+Run 2: 2026-10-14 19:21:23Z to 19:54:38Z; AC power on; 12.4 GB RAM free and GPU 0 MiB in
+use before; the same hold, extended on the board and by message; harness commit 1fe403a18,
+same command plus `--route uniform`.
+
 Run 1: 2026-10-14 19:17:00Z to 19:18:58Z; AC power on; 11.3 GB RAM free before;
 GPU 0 MiB in use before; D: 214 GB free after the 533 GB store was written; a
 measurement hold on the board, every other session confirmed idle. Harness commit
@@ -96,10 +103,35 @@ predicted ~1.5-1.7 TB of expert reads per step for a model routing like a traine
 run 1 read 40 GB. Its time is real for what it did, and says nothing about a real K2
 step. Run 2 (section 2.1) measures that case.
 
-### 4.2 Run 2: forced uniform routing
+### 4.2 Run 2: forced uniform routing (random weights, shape only; routing forced uniform)
 
-(empty)
+Raw JSON: `benchmarks/results/probe-rtx5070/giant-moe/k2-step-uniform.json`.
+
+| step | seconds | tokens/s | loss | grads finite | peak alloc VRAM | peak reserved | peak working set | expert reads | expert bytes | layer loads |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 (cold) | 867.95 | 0.590 | 13.477 | 610 / 610 | 4,342 MiB | 5,052 MiB | 7.75 GB | 69,120 | 1,570.34 GB | 120 |
+| 1 | 1,108.77 | 0.462 | 13.470 | 610 / 610 | 4,723 MiB | 5,170 MiB | 7.89 GB | 69,120 | 1,570.34 GB | 118 |
+
+- Expert reads are exactly the predicted 60 x 384 x 3 = 69,120 per step.
+- Expert bytes per step, 1.57 TB, are 2.95 x the 533 GB store: each expert is read in forward, in the checkpoint's recompute, and in its own backward.
+- Seconds per expert byte: 1.81 GB/s of expert reads in step 0 and 1.42 GB/s in step 1, compute included.
+- Step 1 was slower than step 0. Nothing in the run says why; it is reported as measured.
+
+Against section 2.1, both steps finish:
+- loss and all 610 adapter gradients finite;
+- peak VRAM 4,723 MiB <= 7,500;
+- peak working set 7.89 GB < 20 GB.
+
+**Run 2 COMPLETES.**
 
 ## 5. Verdict
 
-(empty until run 2)
+**COMPLETES.** On an RTX 5070 Laptop (8 GB) with 31.7 GB of RAM, layer streaming plus expert-granularity streaming runs a full LoRA training step (forward, backward, AdamW) of a Kimi K2-shaped model: 1,026,408,232,448 parameters, random weights, 533 GB NF4 on NVMe. Peak VRAM is 4.7 GB.
+
+**A step takes 15-18.5 minutes when every expert is routed (run 2); a trained model routes nearly every expert (#992).** That is a capacity demonstration, not a training regime: at 512 tokens per step it is ~0.5 tokens/s. The time is the read volume, 1.57 TB per step, three passes over the experts. L2L (Pudipeddi et al. 2020) is the published way to amortise those reads across micro-batches, and this run does not use it.
+
+**Not shown:**
+- convergence or quality: the weights are random;
+- a real K2 checkpoint: it is FP8, which the sharder refuses;
+- more than two steps;
+- whether step 1's slowdown persists.
