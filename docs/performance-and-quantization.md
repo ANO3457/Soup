@@ -449,6 +449,7 @@ training:
   # stream_pin: false          # Force the pinned RAM store off (escape hatch) or on; unset = automatic. See below
   # stream_vram_override: 4_000_000_000   # Bytes to assume free (v0.73.x); see below
   # stream_vram_probe: true    # Decide the fit by MEASURING one step (sft only); see below
+  # stream_nf4_scale_cache: true  # Keep expanded NF4 scales resident (4bit + double quant); see below
   # stream_disk_kind: nvme     # Override auto disk-kind detection: nvme/ssd/hdd; see below
 ```
 
@@ -467,6 +468,19 @@ training shapes, Soup keeps that path and avoids adding a third dequantisation t
 checkpointed step. The fused arm reduces saved-weight VRAM but its backward still
 dequantises because bitsandbytes exposes no transposed 4-bit GEMM; it is therefore a
 bounded memory/time trade, not a claim that #842's full kernel ceiling is complete.
+
+**`stream_nf4_scale_cache` (opt-in).** On the dequantise + `F.linear` path, a
+double-quantised NF4 weight expands its 8-bit block scales to fp32 on every visit,
+forward and recompute alike: two small kernels and a temporary per projection.
+The base is frozen, so with `training.stream_nf4_scale_cache: true` each
+(layer, weight) is expanded once and kept on the compute device; results are
+bit-identical. It costs 4 bytes per 64-element block for the whole run (416 MiB on
+Mistral-7B, one eighth of the packed 4-bit weights), which the pre-flight charges
+up front and prints as a `scale cache` line. The fused GEMM arm expands the scales
+inside its kernel and is unchanged, so on a shape bitsandbytes sends there the
+cache stays empty. Needs `quantization: 4bit` with double quantization (the
+default). It trades VRAM for time, and the time saved has not been measured
+across machines yet, so it is off by default.
 
 **Qwen3.8-Flash-Next / Qwen4-Exp PLE.** The frozen PLE N-gram table is not a
 decoder-layer weight for storage purposes: putting it in the PLE layer's shard
@@ -564,7 +578,7 @@ The 3.32 GB 8B row above predates large-layer streaming: its untied, unquantised
   - **Warm — the whole store in the page cache — was reported as a 1.03–1.20x REGRESSION** against the synchronous source (gate-971 §5). Position-matched in both run orders it is **0.91–0.97x**, i.e. not one: the bracket was the run-order effect that record had already named for the cold fixture (#974). After the change, in one session against the reader it replaces, the new reader is 0.76x of it warm (1.58 vs 2.09 s) and 2.25x faster right after a page-cache eviction (1.79 vs 4.02 s). **If the store fits RAM, use the RAM tier** — 1.1 s against 1.8–2.0 s for either disk arm in the same session; the disk tier exists for a store that does not.
   - **It is still bound by the read, less so since #974**: per-layer read brackets were 82.6–84.9% of the cold step in gate-971 and are 62–64% after the direct-I/O reader. There is no measured read-free floor at this sequence to compare that against — the ~14 s figure is at a shorter one — so no headroom ratio is quoted.
   - **`stream_read_ahead` did not change throughput** in that record. Depths 1, 2 and 4 were indistinguishable once run order was controlled for — the same configuration measured 48.09 s run first and 30.28 s run last, as the page cache warmed across blocks, which is larger than the whole spread across depths. Treat it as a **host-memory knob**: 1.5 GB of pinned staging at depth 1, 2.0 GB at 2, 2.8 GB at 4 on a 70B. The pre-flight prints that figure on the disk tier (`host staging read_ahead N -> X MB`) and **refuses the run** when it plus the resident extras will not fit the free-RAM headroom, naming `stream_read_ahead` as the knob to lower — the embedding and an untied `lm_head` take one slot each at any depth, because they are one layer each.
-  - **Disk-kind detection.** A paravirtual (virtio) disk reports `rotational=1` with no media hint, so a genuinely NVMe-backed cloud disk was misread as an HDD and refused (#365); detection now measures a bounded O_DIRECT sequential read when the rotational flag is unreliable and admits NVMe-class throughput (>= 1 GB/s), while a genuinely slow disk stays rejected. Set `training.stream_disk_kind: nvme` (or `ssd`/`hdd`) to override when detection is still wrong — the resolved value is printed beside what was detected.
+  - **Disk-kind detection.** On Linux, detection follows the requested path's device through `/sys/dev/block`, including partitions and device-mapper/RAID members; a mixed volume uses its slowest member. An unrelated NVMe disk does not qualify the cache volume. A paravirtual (virtio) disk reports `rotational=1` with no media hint, so a genuinely NVMe-backed cloud disk was misread as an HDD and refused (#365); detection measures a bounded O_DIRECT sequential read on the requested path when the rotational flag is unreliable or the device cannot be attributed, and admits NVMe-class throughput (>= 1 GB/s), while a genuinely slow disk stays rejected. Set `training.stream_disk_kind: nvme` (or `ssd`/`hdd`) to override when detection is still wrong — the resolved value is printed beside what was detected.
 - **Apple APFS disk detection.** On macOS, an APFS volume may report `Apple Fabric`
   even when its physical store is Apple's internal NVMe. Soup resolves the target
   volume to its APFS physical store and admits it only when that exact device is
@@ -702,7 +716,8 @@ prints this advice when it sees you accumulating.
 - `moe_expert_quant` → expert quantization runs only in the resident model-construction path and would otherwise be silently ignored
 - `unfrozen_parameters`, `lisa_enabled`, `packing`, `multipack`, `use_fsdp2_compile`, `train_router_only`, `expand_layers` → each independently rewrites or re-freezes the same layers
 - `use_liger` / `use_flash_attn` → **not reached at all** under streaming (#1692). Both are read by the *resident* setup: Liger patches the MLP forward there, and flash-attn is handed to `from_pretrained` as `attn_implementation`. A streamed model is built by `from_config` with no attention argument and no Liger patch, and `_liger_applied` is never set, so `use_liger_kernel` misses `TrainingArguments` too. These are the switches you reach for when a streamed run will not fit, so they are refused rather than dropped; each is offered again once it is wired and shown to engage on a streamed model. On every task outside `{sft, tts}` they are already refused at config load (#806)
-- `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_read_ahead` / `stream_vram_override` / `stream_vram_probe` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
+- `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_read_ahead` / `stream_vram_override` / `stream_vram_probe` / `stream_nf4_scale_cache` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
+- `stream_nf4_scale_cache` without `quantization: 4bit` and double quantization → refused: there are no nested NF4 scales to cache
 - a non-default `stream_read_ahead` beside `stream_source: ram` → refused. The read-ahead reader belongs to the NVMe disk tier and `ram` never falls back to it, so the setting would validate, be documented, and reach nothing. The default is accepted, because a default is not a decision
 - a disk-tier run whose host staging (`stream_read_ahead` layers, plus one slot each for the embedding and an untied `lm_head`) plus the resident extras will not fit the free-RAM headroom → refused by name, naming the depth to lower. Refused rather than clamped: a depth you set is a decision, and silently lowering it would hand back a slower run than the one you configured
 - more than 8 distinct layer shapes in one shard index → refused. Staging is allocated per shape and a shape with one member takes a full slot at any depth, so an index whose every layer differed would hold most of the model in staging at once — page-locked when the box allows it and `stream_pin` is not false, a loud pageable fallback otherwise, and a refusal only under `stream_pin: true` on a CUDA target — which is what the disk tier exists to avoid. A real model has one to three
@@ -1375,7 +1390,7 @@ supported transformers path for these precision features.
 
 `soup merge --save-format 4bit` and `--save-format 4bit_forced` write a single BNB-4bit-quantized merged checkpoint without the wasteful dequant → merge → requant cycle (unsloth `merged_4bit` recipe). `4bit_forced` quantizes all linear layers including `lm_head`; models with tied embeddings (`tie_word_embeddings: true`) cannot hold a 4-bit `lm_head` sharing weights with embeddings and are explicitly refused by name with `ValueError`. v0.53.0 shipped the closed allowlist + spec metadata; the live writer landed in v0.53.1.
 
-`soup export --format torchao --quant-config <yaml>` is the planned PTQ export surface for `torchao.quantize_` + `save_pretrained`. Four schemes are allowlisted: `Int4WeightOnly`, `Int8DynActInt4`, `Float8DynActFloat8`, `NVFP4`. CASE-SENSITIVE — these are Soup's scheme names, mapped to the torchao class that implements each one in `utils/torchao_compat.py` (three of the four names Soup used to look up by `hasattr` do not exist in torchao; #826). `Int4WeightOnly` accepts `group_size`; `inner_k_tiles` was removed, because `Int4WeightOnlyConfig` raises `TypeError` for it. Diverges from `--save-format` (lowercase-normalised) on purpose; documented at both validators.
+`soup export --format torchao --quant-config <yaml>` is the live PTQ export (v0.53.1, #142): it runs `torchao.quantize_` on the model and writes the result with `save_pretrained`, to `--output` or, by default, next to the model as `<model>.torchao.<scheme>`. `--quant-config` is required with `--format torchao` (the command exits 2 without it) and the YAML must declare a top-level `scheme:` key. Four schemes are allowlisted: `Int4WeightOnly`, `Int8DynActInt4`, `Float8DynActFloat8`, `NVFP4`. CASE-SENSITIVE — these are Soup's scheme names, mapped to the torchao class that implements each one in `utils/torchao_compat.py` (three of the four names Soup used to look up by `hasattr` do not exist in torchao; #826). `Int4WeightOnly` and `Int8DynActInt4` accept `group_size`, `Float8DynActFloat8` and `NVFP4` take no extra keys, and any other key is refused (exit 2) with a message listing the allowed ones; `inner_k_tiles` was removed, because `Int4WeightOnlyConfig` raises `TypeError` for it. Diverges from `--save-format` (lowercase-normalised) on purpose; documented at both validators.
 
 
 ## Quant Menu II + Export Pipeline (v0.53.1)
