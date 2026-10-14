@@ -2781,15 +2781,18 @@ class StreamRuntime:
         mapping charges Windows commit for the file's whole size (#926).
         A no-op for the RAM tier, which owns neither a thread nor handles.
         """
-        source_close = getattr(self.source, "close", None)
-        if callable(source_close):
-            source_close()
-        for external in self.external_sources:
-            external_close = getattr(external, "close", None)
-            if callable(external_close):
-                external_close()
-        for reader in self.expert_readers:
-            reader.close()
+        try:
+            source_close = getattr(self.source, "close", None)
+            if callable(source_close):
+                source_close()
+            for external in self.external_sources:
+                external_close = getattr(external, "close", None)
+                if callable(external_close):
+                    external_close()
+        finally:
+            # One open handle per MoE layer's experts file (expert_layout "per_expert").
+            for reader in self.expert_readers:
+                reader.close()
         if self.hook is not None:
             self.hook.remove()
             self.hook = None
@@ -3017,6 +3020,7 @@ def install_streaming(
             f"{index.n_layers} — reshard the checkpoint"
         )
 
+    _require_stripe_folders(shard_dir, index)
     # Before the name maps: the fused expert parameters leave the layer here,
     # so the layer pool never allocates them.
     expert_readers = _install_expert_streaming(
@@ -3028,7 +3032,6 @@ def install_streaming(
             "no meta decoder weights found — the base was materialised, which "
             "defeats layer streaming entirely"
         )
-    _require_stripe_folders(shard_dir, index)
     decoder_paths = layer_paths(shard_dir, index)
     layer_specs = RamSource.layer_specs_from_paths(decoder_paths)
     large_specs = large_layer_specs(shard_dir, index)

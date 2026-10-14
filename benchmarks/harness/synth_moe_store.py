@@ -5,8 +5,10 @@ disk that would hold its ~0.58 TB NF4 shard cache. So this skips the bf16
 source and writes the cache ``layer_shard.shard_checkpoint`` would have made
 with ``quant="nf4", expert_layout="per_expert"``: an ``index.json`` the runtime
 accepts, NF4 decoder-layer files, one experts file per MoE layer, the extras
-and the untied embedding / head. Every NF4 byte comes from one seeded random
-pool reused at rotating offsets; every absmax is ``1/sqrt(fan_in)``. Numbers
+and the untied embedding / head. The NF4 layout is the sharder's default,
+double quantisation (uint8 absmax codes, an fp32 nested absmax per 256 blocks, a
+scalar offset). Every packed NF4 byte comes from one seeded random pool reused
+at rotating offsets; every block's absmax decodes to ``1/sqrt(fan_in)``. Numbers
 measured on it are labelled "random weights, shape only" wherever they appear.
 
     python benchmarks/harness/synth_moe_store.py --out D:/soup-bench/moe-k2-synth --shape k2
@@ -137,22 +139,37 @@ class _Pool:
         return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
+_NESTED_BLOCK = 256
+
+
 def _nf4_entries(name: str, out_features: int, in_features: int):
     n = out_features * in_features
     if n % 64:
         raise ValueError(f"{name}: {n} weights is not a multiple of the NF4 block (64)")
+    blocks = n // 64
+    nested = -(-blocks // _NESTED_BLOCK)
     return [
         (name, "U8", (n // 2, 1), n // 2),
-        (name + "::absmax", "F32", (n // 64,), (n // 64) * 4),
+        (name + "::absmax", "U8", (blocks,), blocks),
+        (name + "::nested_absmax", "F32", (nested,), nested * 4),
+        (name + "::nested_offset", "F32", (), 4),
     ]
 
 
-def _nf4_payload(pool: _Pool, out_features: int, in_features: int):
+def _nf4_payload(pool: _Pool, out_features: int, in_features: int, code_index: int):
+    """Packed bytes, then the double-quantised absmax: every block's uint8 code
+    points at the nested table's 1.0 entry, so absmax = nested_absmax = 1/sqrt(fan_in)."""
     import numpy as np
 
     n = out_features * in_features
-    absmax = np.full(n // 64, 1.0 / math.sqrt(in_features), dtype=np.float32)
-    return [pool.take(n // 2), absmax]
+    blocks = n // 64
+    nested = -(-blocks // _NESTED_BLOCK)
+    return [
+        pool.take(n // 2),
+        np.full(blocks, code_index, dtype=np.uint8),
+        np.full(nested, 1.0 / math.sqrt(in_features), dtype=np.float32),
+        np.zeros((), dtype=np.float32),
+    ]
 
 
 def _write_streaming(path: str, entries, payloads) -> None:
@@ -194,6 +211,26 @@ def _nf4_code():
     return get_4bit_type("nf4", device="cpu").to(torch.float32)
 
 
+def _nested_code():
+    """The table double quantisation codes absmax with (``quantize_blockwise``)."""
+    import torch
+    from bitsandbytes.functional import create_dynamic_map
+
+    return create_dynamic_map(signed=True).to(torch.float32)
+
+
+def _large_matrix(vocab: int, hidden: int, generator):
+    """A bf16 [vocab, hidden] N(0, 0.02) matrix built in row slices, so at most
+    one fp32 slice exists at once (the K2 vocabulary is 163840 x 7168)."""
+    import torch
+
+    out = torch.empty(vocab, hidden, dtype=torch.bfloat16)
+    for start in range(0, vocab, 8192):
+        stop = min(vocab, start + 8192)
+        out[start:stop] = torch.randn(stop - start, hidden, generator=generator) * 0.02
+    return out
+
+
 def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> dict:
     import numpy as np
     import torch
@@ -204,6 +241,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
     from soup_cli.utils.layer_shard import (
         _SHARD_FORMAT_VERSION,
         NF4_CODE_KEY,
+        NF4_NESTED_CODE_KEY,
         NF4WeightSpec,
         ShardIndex,
         _atomic_write_index,
@@ -217,6 +255,10 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
     with open(os.path.join(out, "config.json"), "w", encoding="utf-8") as handle:
         json.dump(config_dict(shape), handle, indent=2)
     pool = _Pool(seed)
+    nested_code = _nested_code()
+    one = int(nested_code.argmax())
+    if float(nested_code[one]) != 1.0:
+        raise ValueError("the nested code table has no exact 1.0 entry")
     hidden = shape["hidden_size"]
     vocab = shape["vocab_size"]
     n_layers = shape["num_hidden_layers"]
@@ -226,7 +268,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
     def spec(out_features, in_features):
         return NF4WeightSpec(
             shape=(out_features, in_features), dtype="bfloat16", blocksize=64,
-            quant_type="nf4", nested=False, nested_blocksize=0,
+            quant_type="nf4", nested=True, nested_blocksize=_NESTED_BLOCK,
         )
 
     quant_specs = {}
@@ -239,7 +281,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
         for name, (o, i) in _linears(shape, layer).items():
             quant_specs[name] = spec(o, i)
             entries += _nf4_entries(name, o, i)
-            payloads += _nf4_payload(pool, o, i)
+            payloads += _nf4_payload(pool, o, i, one)
             total += o * i
         for name, (dims, dtype, fill) in _dense(shape, layer).items():
             count = math.prod(dims)
@@ -264,8 +306,8 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
 
             def expert_payloads():
                 for _ in range(experts):
-                    yield from _nf4_payload(pool, 2 * inter, hidden)
-                    yield from _nf4_payload(pool, hidden, inter)
+                    yield from _nf4_payload(pool, 2 * inter, hidden, one)
+                    yield from _nf4_payload(pool, hidden, inter, one)
 
             _write_streaming(os.path.join(out, expert_shard_name(layer)), expert_entries,
                              expert_payloads())
@@ -276,7 +318,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
 
     generator = torch.Generator().manual_seed(seed)
     for key in ("model.embed_tokens.weight", "lm_head.weight"):
-        matrix = (torch.randn(vocab, hidden, generator=generator) * 0.02).to(torch.bfloat16)
+        matrix = _large_matrix(vocab, hidden, generator)
         save_file({key: matrix}, large_shard_path(out, key))
         written_bytes += matrix.numel() * 2
         total += matrix.numel()
@@ -284,6 +326,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
     extras = {
         "model.norm.weight": torch.ones(hidden, dtype=torch.bfloat16),
         NF4_CODE_KEY: _nf4_code(),
+        NF4_NESTED_CODE_KEY: nested_code,
     }
     save_file(extras, extras_shard_path(out))
     total += hidden
@@ -302,7 +345,7 @@ def write_store(out: str, shape_name: str, *, seed: int = 1234, log=print) -> di
         source_fingerprint=f"synthetic-{shape_name}-seed{seed}",
         source_files=(),
         quant="nf4",
-        double_quant=False,
+        double_quant=True,
         quant_device="cuda",
         quant_specs=quant_specs,
         expert_layout=EXPERT_LAYOUT_PER_EXPERT,
