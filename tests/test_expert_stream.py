@@ -140,6 +140,21 @@ def test_each_routed_expert_is_read_once_forward_and_once_backward(tmp_path):
     reader.close()
 
 
+def test_fetched_weights_are_owned_not_views_of_the_staging_buffer(tmp_path):
+    """Every read lands in one shared staging buffer; a fetch must hand back
+    tensors the next read cannot overwrite (on a CPU target `.to` would not copy)."""
+    import torch
+
+    module, n_experts, _ = _deepseek_v3_experts(5)
+    streamed, reader = _streamed_copy(tmp_path, module, n_experts)
+    first = [tensor.clone() for tensor in streamed.fetch(0)]
+    held = streamed.fetch(0)
+    streamed.fetch(1)
+    assert torch.equal(held[0], first[0]) and torch.equal(held[1], first[1])
+    assert not torch.equal(first[0], module.gate_up_proj[1])
+    reader.close()
+
+
 # --------------------------------------------------------------------------
 # experts file + reader
 # --------------------------------------------------------------------------
@@ -188,7 +203,7 @@ def test_reader_refuses_a_file_with_more_experts_than_the_index(tmp_path):
 
     path = str(tmp_path / "experts_001.safetensors")
     pair = (torch.zeros(6, 4), torch.zeros(4, 3))
-    info = write_expert_shard(path, [pair, pair], quantise=False)
+    info = write_expert_shard(path, [pair, (pair[0] + 1, pair[1] + 1)], quantise=False)
     with pytest.raises(ValueError, match="holds more than 1 experts"):
         ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
 

@@ -103,9 +103,7 @@ def write_expert_shard(
             total += tensor.numel()
             key = expert_key(expert, part)
             if not quantise:
-                # Owned copies: rows of one fused 3-D tensor share its storage,
-                # which safetensors refuses to write.
-                blob[key] = tensor.detach().contiguous().clone()
+                blob[key] = tensor.detach().contiguous()
                 continue
             sidecars, spec, seen_code, seen_nested = _quantize_nf4(
                 tensor, double_quant=double_quant, device=device
@@ -494,10 +492,9 @@ def install_expert_streaming(
         parent, attr, module = found
         expected_gate_up = tuple(int(dim) for dim in module.gate_up_proj.shape)
         expected_down = tuple(int(dim) for dim in module.down_proj.shape)
-        if expected_gate_up != (reader.count, *reader.shapes[GATE_UP]) or expected_down != (
-            reader.count,
-            *reader.shapes[DOWN],
-        ):
+        stored_gate_up = (reader.count, *reader.shapes[GATE_UP])
+        stored_down = (reader.count, *reader.shapes[DOWN])
+        if (expected_gate_up, expected_down) != (stored_gate_up, stored_down):
             raise ValueError(
                 f"decoder layer {idx}: the model's experts are {expected_gate_up} / "
                 f"{expected_down} but the experts file holds {reader.count} x "
