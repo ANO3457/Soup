@@ -449,6 +449,7 @@ training:
   # stream_pin: false          # Force the pinned RAM store off (escape hatch) or on; unset = automatic. See below
   # stream_vram_override: 4_000_000_000   # Bytes to assume free (v0.73.x); see below
   # stream_vram_probe: true    # Decide the fit by MEASURING one step (sft only); see below
+  # stream_nf4_scale_cache: true  # Keep expanded NF4 scales resident (4bit + double quant); see below
   # stream_disk_kind: nvme     # Override auto disk-kind detection: nvme/ssd/hdd; see below
 ```
 
@@ -467,6 +468,19 @@ training shapes, Soup keeps that path and avoids adding a third dequantisation t
 checkpointed step. The fused arm reduces saved-weight VRAM but its backward still
 dequantises because bitsandbytes exposes no transposed 4-bit GEMM; it is therefore a
 bounded memory/time trade, not a claim that #842's full kernel ceiling is complete.
+
+**`stream_nf4_scale_cache` (opt-in).** On the dequantise + `F.linear` path, a
+double-quantised NF4 weight expands its 8-bit block scales to fp32 on every visit,
+forward and recompute alike: two small kernels and a temporary per projection.
+The base is frozen, so with `training.stream_nf4_scale_cache: true` each
+(layer, weight) is expanded once and kept on the compute device; results are
+bit-identical. It costs 4 bytes per 64-element block for the whole run (416 MiB on
+Mistral-7B, one eighth of the packed 4-bit weights), which the pre-flight charges
+up front and prints as a `scale cache` line. The fused GEMM arm expands the scales
+inside its kernel and is unchanged, so on a shape bitsandbytes sends there the
+cache stays empty. Needs `quantization: 4bit` with double quantization (the
+default). It trades VRAM for time, and the time saved has not been measured
+across machines yet, so it is off by default.
 
 **Qwen3.8-Flash-Next / Qwen4-Exp PLE.** The frozen PLE N-gram table is not a
 decoder-layer weight for storage purposes: putting it in the PLE layer's shard
@@ -702,7 +716,8 @@ prints this advice when it sees you accumulating.
 - `moe_expert_quant` → expert quantization runs only in the resident model-construction path and would otherwise be silently ignored
 - `unfrozen_parameters`, `lisa_enabled`, `packing`, `multipack`, `use_fsdp2_compile`, `train_router_only`, `expand_layers` → each independently rewrites or re-freezes the same layers
 - `use_liger` / `use_flash_attn` → **not reached at all** under streaming (#1692). Both are read by the *resident* setup: Liger patches the MLP forward there, and flash-attn is handed to `from_pretrained` as `attn_implementation`. A streamed model is built by `from_config` with no attention argument and no Liger patch, and `_liger_applied` is never set, so `use_liger_kernel` misses `TrainingArguments` too. These are the switches you reach for when a streamed run will not fit, so they are refused rather than dropped; each is offered again once it is wired and shown to engage on a streamed model. On every task outside `{sft, tts}` they are already refused at config load (#806)
-- `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_read_ahead` / `stream_vram_override` / `stream_vram_probe` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
+- `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_read_ahead` / `stream_vram_override` / `stream_vram_probe` / `stream_nf4_scale_cache` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
+- `stream_nf4_scale_cache` without `quantization: 4bit` and double quantization → refused: there are no nested NF4 scales to cache
 - a non-default `stream_read_ahead` beside `stream_source: ram` → refused. The read-ahead reader belongs to the NVMe disk tier and `ram` never falls back to it, so the setting would validate, be documented, and reach nothing. The default is accepted, because a default is not a decision
 - a disk-tier run whose host staging (`stream_read_ahead` layers, plus one slot each for the embedding and an untied `lm_head`) plus the resident extras will not fit the free-RAM headroom → refused by name, naming the depth to lower. Refused rather than clamped: a depth you set is a decision, and silently lowering it would hand back a slower run than the one you configured
 - more than 8 distinct layer shapes in one shard index → refused. Staging is allocated per shape and a shape with one member takes a full slot at any depth, so an index whose every layer differed would hold most of the model in staging at once — page-locked when the box allows it and `stream_pin` is not false, a loud pageable fallback otherwise, and a refusal only under `stream_pin: true` on a CUDA target — which is what the disk tier exists to avoid. A real model has one to three

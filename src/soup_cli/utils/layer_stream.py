@@ -19,7 +19,7 @@ stay resident.
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from rich.panel import Panel
 
@@ -1199,6 +1199,22 @@ def estimate_optimizer_bytes(
     return adapter_params * bytes_per_param
 
 
+def nf4_scale_cache_bytes(quant_specs: Mapping[str, Any], n_layers: int) -> int:
+    """Device bytes ``training.stream_nf4_scale_cache`` holds once every layer ran.
+
+    One fp32 scale per block of every double-quantised decoder weight, in every
+    layer. ``quant_specs`` is keyed by the layer-relative name shared across
+    layers, so a model whose layers do not all carry a weight is over-counted,
+    which is the safe direction for a number that can refuse a run.
+    """
+    per_layer = sum(
+        4 * -(-math.prod(spec.shape) // spec.blocksize)
+        for spec in quant_specs.values()
+        if spec.nested
+    )
+    return per_layer * n_layers
+
+
 def estimate_stream_peak_vram(
     *,
     layer_bytes: int,
@@ -1214,6 +1230,7 @@ def estimate_stream_peak_vram(
     dtype: str = "bfloat16",
     logits_bytes_per_element: Optional[float] = None,
     large_layer_bytes: int = 0,
+    persistent_bytes: int = 0,
 ) -> int:
     """Predicted ``torch.cuda.max_memory_allocated()`` for a streaming step.
 
@@ -1239,10 +1256,14 @@ def estimate_stream_peak_vram(
     ``logits_bytes_per_element`` forwards a stack measurement from
     :func:`calibrated_logits_bytes_per_element`; it is floored at the shipped
     constant, so passing it can only raise the prediction.
+
+    ``persistent_bytes`` is device memory the runtime holds for the whole run on
+    top of the pool, such as :func:`nf4_scale_cache_bytes`.
     """
     return (
         layer_bytes * buffers
         + large_layer_bytes
+        + persistent_bytes
         + extras_bytes
         + estimate_optimizer_bytes(adapter_params)
         + STREAM_FIXED_SLACK_BYTES

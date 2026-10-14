@@ -1211,6 +1211,7 @@ class StreamingSetupMixin:
             weights_dir=weights_dir,
             ngram_source=ngram_source,
             refill_before_backward=self._STREAM_REFILL_BEFORE_BACKWARD,
+            nf4_scale_cache=bool(getattr(tcfg, "stream_nf4_scale_cache", False)),
         )
         self.model = model
         self._stream_runtime = runtime
@@ -1332,9 +1333,18 @@ class StreamingSetupMixin:
             estimate_logits_bytes,
             estimate_stream_peak_vram,
             forecast_stream_throughput,
+            nf4_scale_cache_bytes,
             resolve_available_vram_bytes,
         )
         from soup_cli.utils.layer_stream_runtime import measure_gemm_tflops
+
+        # Charged whole even though it fills lazily: the cache is complete after
+        # the first step and stays resident for the run.
+        scale_cache_bytes = (
+            nf4_scale_cache_bytes(getattr(index, "quant_specs", None) or {}, index.n_layers)
+            if getattr(tcfg, "stream_nf4_scale_cache", False)
+            else 0
+        )
 
         shape_cfg = self._stream_shape_config(model_config)
         vocab = int(getattr(shape_cfg, "vocab_size", 0) or 0)
@@ -1378,6 +1388,7 @@ class StreamingSetupMixin:
             batch_size=rows,
             logits_bytes_per_element=calibrated,
             large_layer_bytes=large_layer_bytes,
+            persistent_bytes=scale_cache_bytes,
         )
         logits = estimate_logits_bytes(
             vocab_size=vocab, seq_len=seq_len, batch_size=rows, bytes_per_element=calibrated
@@ -1389,6 +1400,11 @@ class StreamingSetupMixin:
             f"  peak VRAM    ~{predicted / 1e9:.2f} GB at batch {batch} x seq "
             f"{seq_len}{paired} (logits {logits / 1e9:.2f} GB)"
         ]
+        if scale_cache_bytes:
+            lines.append(
+                f"  scale cache  {scale_cache_bytes / 1e9:.2f} GB resident "
+                "(training.stream_nf4_scale_cache), included above"
+            )
         if calibrated > LOGITS_BYTES_PER_ELEMENT:
             lines.append(
                 f"  logits       calibrated {calibrated:.3f} B/element on this stack, "

@@ -175,6 +175,69 @@ def rebuild_params4bit(key: str, buffers: Mapping[str, Any], spec: Any, codes: M
     )
 
 
+class NF4ScaleCache:
+    """Expanded fp32 block scales of streamed nested-NF4 weights (opt-in).
+
+    bitsandbytes' dequantise + linear path expands a double-quantised weight's
+    scales on every call: ``dequantize_blockwise`` of the 8-bit codes, then
+    ``+= offset``. The base is frozen, so the result for a (layer, weight) never
+    changes; this keeps it on the compute device after the first visit and hands
+    later visits a non-nested ``QuantState`` over it. The expansion below is the
+    one in ``bitsandbytes.functional.dequantize_4bit``, so the 4-bit dequantise
+    that follows reads identical scales.
+
+    Keyed by layer index and shard key, never by pool slot: several layers take
+    turns in one slot. Only the dense path may use it; the fused custom GEMM
+    expands the nested scales inside its kernel.
+    """
+
+    def __init__(self) -> None:
+        self._states: Dict[Tuple[int, str], Any] = {}
+
+    def __len__(self) -> int:
+        return len(self._states)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(
+            state.absmax.numel() * state.absmax.element_size() for state in self._states.values()
+        )
+
+    def dense_state(self, key: Tuple[int, str], quant_state: Any) -> Any:
+        state = self._states.get(key)
+        if state is None:
+            state = self._expand(quant_state)
+            self._states[key] = state
+        elif state.shape != quant_state.shape or state.blocksize != quant_state.blocksize:
+            raise RuntimeError(
+                f"NF4 scale cache entry {key} was built for shape {tuple(state.shape)} "
+                f"/ block {state.blocksize}, but the weight now has shape "
+                f"{tuple(quant_state.shape)} / block {quant_state.blocksize}"
+            )
+        return state
+
+    @staticmethod
+    def _expand(quant_state: Any) -> Any:
+        import torch
+        from bitsandbytes import functional as bnb_functional
+
+        absmax = bnb_functional.dequantize_blockwise(quant_state.absmax, quant_state.state2)
+        absmax += quant_state.offset
+        if absmax.dtype != torch.float32:
+            absmax = absmax.float()
+        return bnb_functional.QuantState(
+            absmax=absmax,
+            shape=quant_state.shape,
+            code=quant_state.code,
+            blocksize=quant_state.blocksize,
+            quant_type=quant_state.quant_type,
+            dtype=quant_state.dtype,
+        )
+
+    def clear(self) -> None:
+        self._states.clear()
+
+
 _CHECKPOINT_VISIBLE_NF4_FUNCTION = None
 
 
@@ -440,7 +503,11 @@ def install_dequant_forward(module: Any) -> int:
             ).to(inp_dtype)
 
         # Compatibility path: dequantise inside the checkpointed region and let
-        # F.linear save the dense weight properly.
+        # F.linear save the dense weight properly. The fused arm above keeps the
+        # nested state: its kernel expands the scales itself.
+        scale_cache = getattr(self.weight, "_soup_scale_cache", None)
+        if scale_cache is not None:
+            quant_state = scale_cache.dense_state(self.weight._soup_scale_cache_key, quant_state)
         weight = dequantize_4bit(self.weight, quant_state).to(x.dtype)
         return functional.linear(x, weight, bias).to(inp_dtype)
 
@@ -1415,6 +1482,7 @@ def _build_streamed_layer_class():
             use_checkpoint=True,
             quant_specs=None,
             codes=None,
+            scale_cache=None,
         ):
             super().__init__()
             self.inner = inner
@@ -1425,6 +1493,9 @@ def _build_streamed_layer_class():
             self.use_checkpoint = bool(use_checkpoint)
             self.quant_specs = dict(quant_specs or {})
             self.codes = dict(codes or {})
+            # training.stream_nf4_scale_cache — an NF4ScaleCache owned by the
+            # runtime, or None.
+            self.scale_cache = scale_cache
             # #841 — each wrapper returns to the same pool slot on every visit.
             # Cache the tensor/Params4bit substitution views for that slot rather
             # than reconstructing Python wrappers and QuantState objects on every
@@ -1682,6 +1753,9 @@ def _build_streamed_layer_class():
                 else:
                     weight = rebuild_params4bit(ckpt, buffers, spec, self.codes)
                     weight._soup_stream_owner_check = self._assert_nf4_slot_owner
+                    if self.scale_cache is not None:
+                        weight._soup_scale_cache = self.scale_cache
+                        weight._soup_scale_cache_key = (self.idx, ckpt)
                     weights[meta] = weight
             self._cached_substitution_buffers = buffers
             self._cached_substitution_weights = weights
@@ -2794,6 +2868,8 @@ class StreamRuntime:
     total_params: int = 0
     #: Read-only Qwen4 PLE mappings, if the N-gram table is SSD-backed.
     external_sources: Tuple[Any, ...] = ()
+    #: training.stream_nf4_scale_cache — the layers' shared NF4ScaleCache, or None.
+    scale_cache: Any = None
 
     def close(self) -> None:
         """Release the weight source and detach the prefetch hook.
@@ -2815,6 +2891,10 @@ class StreamRuntime:
         if self.hook is not None:
             self.hook.remove()
             self.hook = None
+        if self.scale_cache is not None:
+            # The layers' substituted weights still reference the cache object;
+            # emptying it is what returns the device memory.
+            self.scale_cache.clear()
 
     def stats(self) -> Dict[str, Any]:
         return {
@@ -2839,6 +2919,7 @@ class StreamRuntime:
             "large_loads": getattr(self.large_pool, "loads", 0),
             "device": self.device,
             "total_params": self.total_params,
+            "nf4_scale_cache_bytes": getattr(self.scale_cache, "nbytes", 0),
         }
 
 
@@ -2886,12 +2967,16 @@ def install_streaming(
     read_ahead: int = DEFAULT_STREAM_READ_AHEAD,
     refill_before_backward: bool = False,
     read_ahead_decision: Any = None,
+    nf4_scale_cache: bool = False,
 ) -> StreamRuntime:
     """Wrap every decoder layer and wire the buffer pool + prefetch scheduler.
 
     ``refill_before_backward`` says the loss runs a second forward before each
     step's backward; an untied output head then hands autograd a private copy
     of its weight (#1049).
+
+    ``nf4_scale_cache`` gives the layers one shared :class:`NF4ScaleCache`
+    (``training.stream_nf4_scale_cache``); it needs double-quantised NF4 shards.
 
     ``read_ahead_decision`` (a ``stripe_roots.ReadAheadDecision``, R4) says how
     ``read_ahead`` came about, so the page-lock messages advise a depth that is
@@ -2936,6 +3021,14 @@ def install_streaming(
             f"shard index is inconsistent: quant={getattr(index, 'quant', None)!r} "
             f"but {len(quant_specs)} quant_specs — reshard the checkpoint"
         )
+    scale_cache = None
+    if nf4_scale_cache:
+        if not any(spec.nested for spec in quant_specs.values()):
+            raise ValueError(
+                "nf4_scale_cache=True needs double-quantised NF4 shards, but this "
+                "index has no nested NF4 weights; there are no scales to cache"
+            )
+        scale_cache = NF4ScaleCache()
 
     owner = decoder_owner(model)
     layers = owner.layers
@@ -3058,6 +3151,7 @@ def install_streaming(
             layer_name_maps[idx],
             quant_specs=quant_specs,
             codes=codes,
+            scale_cache=scale_cache,
         )
 
     if large_pool is not None:
@@ -3137,6 +3231,7 @@ def install_streaming(
         hook=handle,
         total_params=int(getattr(index, "total_params", 0) or 0),
         tier=tier,
+        scale_cache=scale_cache,
     )
 
 
@@ -3504,6 +3599,7 @@ def build_streamed_model(
     ngram_source: str = "disk",
     refill_before_backward: bool = False,
     read_ahead_decision: Any = None,
+    nf4_scale_cache: bool = False,
 ) -> Tuple[Any, StreamRuntime]:
     """Meta skeleton -> extras -> LoRA -> streaming. No resident base load.
 
@@ -3556,6 +3652,7 @@ def build_streamed_model(
             read_ahead=read_ahead,
             refill_before_backward=refill_before_backward,
             read_ahead_decision=read_ahead_decision,
+            nf4_scale_cache=nf4_scale_cache,
         )
     except BaseException:
         for external in external_sources:
