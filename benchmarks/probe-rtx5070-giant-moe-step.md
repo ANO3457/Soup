@@ -1,6 +1,6 @@
 # Probe: one LoRA training step on a Kimi K2-shaped store, RTX 5070 Laptop 8 GB
 
-Status: RULE COMMITTED, NOT RUN.
+Status: run 1 (the model's own routing) COMPLETES, see section 4; its step time is NOT a K2 step time (section 4.1). Run 2 (forced uniform routing, the addendum rule in section 2.1) is to follow.
 
 **Every number in this record is "random weights, shape only".** The store is
 synthetic: the parameter count and tensor shapes of `moonshotai/Kimi-K2-Instruct`
@@ -41,16 +41,65 @@ Estimate before the run (an estimate, not a measurement): ~570 GB of experts rea
 (one expert, then its compute), so expect it slower: 7 minutes at 4.1 GB/s, about
 24 at 1.2 GB/s.
 
-## 3. Box state to stamp at run time
+## 2.1 Addendum rule for run 2 (written after run 1, before run 2)
 
-AC power, clock, free RAM before the run, GPU memory used before the run, other
-sessions' holds, D: free space, torch / transformers / bitsandbytes versions,
-the commit the harness ran from, the store's `synth.json`.
+Run 1 routed 512 random tokens to only ~10 of the 384 experts per layer and pass
+(section 4.1). A trained model routes a 512-token step to 96.7-100% of its experts
+(`probe-moe-expert-coverage.md`), so run 1 does not measure what a K2 step reads. Run 2
+repeats the same command with `--route uniform`: every router sends token t to experts
+8t .. 8t+7 (mod 384), so each pass routes to all 384 experts of every MoE layer, the
+coverage a trained model nearly has. The router weights still stream; only its choice
+is replaced. Same thresholds as section 2: **COMPLETES** iff both steps finish with a
+finite loss and finite adapter gradients, peak allocated VRAM <= 7,500 MiB and peak
+working set < 20 GB. Reported, no threshold: seconds per step, expert reads (the design
+predicts 60 x 384 x 3 = 69,120 per step) and expert bytes per step. Label of every
+number: "random weights, shape only; routing forced uniform".
+
+## 3. Box state
+
+Run 1: 2026-10-14 19:17:00Z to 19:18:58Z; AC power on; 11.3 GB RAM free before;
+GPU 0 MiB in use before; D: 214 GB free after the 533 GB store was written; a
+measurement hold on the board, every other session confirmed idle. Harness commit
+0fa52150e. Run with `--tier disk --no-pin`: the RAM tier would pin the ~5 GB of
+dense layer files plus the two 2.35 GB vocabulary matrices on a box with ~11 GB
+free, and pinned disk-tier staging rounds to an 8 GiB arena (seen in a build-only
+check), so staging stays pageable. The rule did not fix the tier; this is the
+configuration that keeps the owner's free-RAM floor.
+
+Store: `synth_moe_store.py --shape k2`, 1,026,408,232,448 parameters,
+533,242,299,230 bytes, written in 588.6 s (`synth.json`), NF4 with double
+quantisation, `expert_layout: per_expert`.
 
 ## 4. Results
+
+### 4.0 Run 1: the model's own routing (random weights, shape only)
+
+Build 4.22 s; 30,513,664 trainable parameters (LoRA r 8 on `q_a_proj`, `q_b_proj`,
+`kv_a_proj_with_mqa`, `kv_b_proj`, `o_proj` of all 61 layers). Raw JSON:
+`benchmarks/results/probe-rtx5070/giant-moe/k2-step.json`.
+
+| step | seconds | tokens/s | loss | grads finite | peak alloc VRAM | peak reserved | peak working set | expert reads | expert bytes | layer loads |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 (cold) | 53.61 | 9.55 | 13.478 | 610 / 610 | 4,342 MiB | 5,052 MiB | 7.67 GB | 1,890 | 42.94 GB | 120 |
+| 1 | 45.21 | 11.33 | 13.473 | 610 / 610 | 4,723 MiB | 5,068 MiB | 7.68 GB | 1,752 | 39.80 GB | 118 |
+
+Against section 2: both steps finish, loss and all 610 adapter gradients finite, peak
+VRAM 4,723 MiB <= 7,500, peak working set 7.68 GB < 20 GB: **run 1 COMPLETES.**
+
+### 4.1 Why run 1's 45 s is not a K2 step time
+
+1,752 expert reads in a step is 1,752 / (60 MoE layers x 3 passes) = ~9.7 distinct
+experts per layer and pass out of 384: the 512 random tokens collapsed onto a few
+experts (with random attention weights every token attends to an average of the same
+prefix, so the hidden states, and with them the routing, nearly coincide). The design
+predicted ~1.5-1.7 TB of expert reads per step for a model routing like a trained one;
+run 1 read 40 GB. Its time is real for what it did, and says nothing about a real K2
+step. Run 2 (section 2.1) measures that case.
+
+### 4.2 Run 2: forced uniform routing
 
 (empty)
 
 ## 5. Verdict
 
-(empty)
+(empty until run 2)
