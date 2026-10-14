@@ -1549,6 +1549,11 @@ def shard_checkpoint(
             if (match := _LAYER_RE.match(key)) is not None
         }
 
+    if expert_layout and not any(_PER_EXPERT_RE.match(key) for key in where):
+        raise ValueError(
+            f"expert_layout={expert_layout!r} found no per-expert routed weights "
+            f"(model.layers.N.mlp.experts.E.*) in {weights_dir} to split"
+        )
     if drop_extra_layers:
         # DeepSeek-V3 / Kimi K2 store the multi-token-prediction module as the
         # layer(s) after the last decoder layer (``model.layers.61.*`` of 61).
@@ -1924,6 +1929,11 @@ def shard_checkpoint(
                 stale = layer_shard_path(resolved_out, idx)
                 if os.path.exists(stale):
                     stale_root0_copies.append(stale)
+            # An experts file the new index will not name (an earlier per_expert
+            # layout, or one now written to a stripe root) goes the same way.
+            stale_experts = os.path.join(resolved_out, expert_shard_name(idx))
+            if (not per_expert_ids or root) and os.path.exists(stale_experts):
+                stale_root0_copies.append(stale_experts)
             del blob
 
         extras = {}
@@ -2005,11 +2015,6 @@ def shard_checkpoint(
         expert_shapes=expert_meta[1] if expert_meta else {},
         expert_quant_specs=expert_meta[2] if expert_meta else {},
     )
-    if expert_layout and not expert_layers_written:
-        raise ValueError(
-            f"expert_layout={expert_layout!r} found no per-expert routed weights "
-            f"(model.layers.N.mlp.experts.E.*) in {weights_dir} to split"
-        )
     _atomic_write_index(index, resolved_out)
     resharding_index = os.path.join(resolved_out, _RESHARDING_INDEX_NAME)
     try:

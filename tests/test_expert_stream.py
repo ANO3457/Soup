@@ -155,6 +155,170 @@ def test_fetched_weights_are_owned_not_views_of_the_staging_buffer(tmp_path):
     reader.close()
 
 
+def test_expert_weights_are_released_after_each_expert(tmp_path):
+    """The VRAM bound: nothing keeps a fetched expert alive once its MLP ran, not
+    the autograd graph after forward, not anything after backward."""
+    import gc
+    import weakref
+
+
+    module, n_experts, top_k = _deepseek_v3_experts(5)
+    streamed, reader = _streamed_copy(tmp_path, module, n_experts)
+    refs = []
+    real_fetch = streamed.fetch
+
+    def tracking_fetch(expert):
+        gate_up, down = real_fetch(expert)
+        refs.extend((weakref.ref(gate_up), weakref.ref(down)))
+        return gate_up, down
+
+    streamed.fetch = tracking_fetch
+    states, index, weights, grad_out = _routing(24, n_experts, top_k, 32, 9)
+    out = streamed(states, index, weights)
+    gc.collect()
+    assert refs and all(ref() is None for ref in refs), "forward kept expert weights alive"
+    refs.clear()
+    out.backward(grad_out)
+    gc.collect()
+    assert refs and all(ref() is None for ref in refs), "backward kept expert weights alive"
+    reader.close()
+
+
+def test_reader_direct_and_buffered_reads_agree(tmp_path):
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    pairs = [(torch.randn(6, 4), torch.randn(4, 3)) for _ in range(3)]
+    info = write_expert_shard(path, pairs, quantise=False)
+    readers = [
+        ExpertShardReader(
+            path, count=3, shapes=info.shapes, quant_specs={}, dtype="float32", direct=direct
+        )
+        for direct in (True, False)
+    ]
+    assert readers[1].direct is False
+    for expert in range(3):
+        views = []
+        for reader in readers:
+            _owner, staging = aligned_staging(reader.max_span)
+            views.append({k: v.clone() for k, v in reader.read_host(expert, staging).items()})
+        assert views[0].keys() == views[1].keys()
+        for key in views[0]:
+            assert torch.equal(views[0][key], views[1][key])
+        assert torch.equal(views[0][f"{expert}.gate_up"], pairs[expert][0])
+    with pytest.raises(IndexError):
+        readers[0].read_host(3, aligned_staging(readers[0].max_span)[1])
+    with pytest.raises(ValueError, match="staging holds"):
+        readers[0].read_host(0, aligned_staging(16)[1])
+    for reader in readers:
+        reader.close()
+
+
+def test_install_refuses_mismatched_layers_and_expert_adapters(tmp_path):
+    import torch.nn as nn
+
+    from soup_cli.utils.expert_stream import ExpertFetcher, install_expert_streaming
+
+    module, n_experts, _ = _deepseek_v3_experts(5)
+    _, reader = _streamed_copy(tmp_path, module, n_experts)
+    fetcher = ExpertFetcher(device="cpu", dtype="float32")
+    with pytest.raises(ValueError, match="no experts file for it"):
+        install_expert_streaming([_holder(module)], {}, fetcher)
+    with pytest.raises(ValueError, match="which has no routed-experts module"):
+        install_expert_streaming([nn.Module()], {0: reader}, fetcher)
+    adapted = _holder(module)
+    adapted.mlp.experts.lora_A = nn.Parameter(module.gate_up_proj.new_zeros(2, 2))
+    with pytest.raises(ValueError, match="adapters on the routed experts"):
+        install_expert_streaming([adapted], {0: reader}, fetcher)
+    reader.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("expert_layout", "experts", "unknown expert_layout"),
+        ("expert_layers", [2, 1], "distinct ascending"),
+        ("expert_layers", [9], "distinct ascending"),
+        ("expert_count", 5000, "do not describe one layout"),
+        ("expert_shapes", {"gate_up": [64, 0], "down": [64, 32]}, "do not describe one layout"),
+    ],
+)
+def test_read_shard_index_refuses_a_malformed_expert_layout(tmp_path, field, value, match):
+    import json
+
+    from soup_cli.utils.layer_shard import read_shard_index
+
+    weights, _ = _tiny_deepseek_v3(tmp_path)
+    _shard(tmp_path, weights, expert_layout="per_expert")
+    path = tmp_path / "shards" / "index.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        read_shard_index(str(tmp_path / "shards"))
+
+
+def test_missing_experts_file_is_a_cache_miss(tmp_path):
+    import os
+
+    from soup_cli.utils.layer_shard import expert_paths, inspect_shard_cache
+
+    weights, _ = _tiny_deepseek_v3(tmp_path)
+    index = _shard(tmp_path, weights, expert_layout="per_expert")
+    os.remove(expert_paths(str(tmp_path / "shards"), index)[2])
+    cached, reason = inspect_shard_cache(
+        str(tmp_path / "shards"), "float32", index.source_fingerprint, index.source_files,
+        "none", False, "", "", stripe_roots=(), expert_layout="per_expert",
+    )
+    assert cached is None and "experts_002.safetensors" in reason
+
+
+def test_resharding_to_the_fused_layout_removes_the_experts_files(tmp_path):
+    import os
+
+    from soup_cli.utils.layer_shard import shard_cache_disk_bytes
+
+    weights, _ = _tiny_deepseek_v3(tmp_path)
+    per_expert = _shard(tmp_path, weights, expert_layout="per_expert")
+    shards = tmp_path / "shards"
+    assert shard_cache_disk_bytes(str(shards), per_expert) > sum(
+        os.path.getsize(path) for path in shards.glob("layer_*.safetensors")
+    )
+    fused = _shard(tmp_path, weights)
+    assert fused.expert_layout == ""
+    assert not list(shards.glob("experts_*.safetensors"))
+
+
+def test_per_expert_layout_refuses_a_checkpoint_without_per_expert_keys_before_writing(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = tmp_path / "w"
+    weights.mkdir()
+    save_file(
+        {
+            "model.embed_tokens.weight": torch.zeros(8, 4),
+            "model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 6, 4),
+            "model.layers.0.mlp.experts.down_proj": torch.zeros(2, 4, 3),
+        },
+        str(weights / "model.safetensors"),
+    )
+    with pytest.raises(ValueError, match="found no per-expert routed weights"):
+        shard_checkpoint(
+            str(weights), str(tmp_path / "s"), dtype="float32", arch="deepseek_v3",
+            expert_layout="per_expert",
+        )
+    assert not list((tmp_path / "s").glob("layer_*.safetensors"))
+
+
 # --------------------------------------------------------------------------
 # experts file + reader
 # --------------------------------------------------------------------------
@@ -437,7 +601,12 @@ def test_streamed_per_expert_backward_matches_resident_lora_gradients(tmp_path):
     from soup_cli.utils.layer_stream_runtime import canonical_named_parameters
 
     model, runtime, ref, ids, _ = _paired(tmp_path)
-    model(input_ids=ids, labels=ids).loss.backward()
+    loss = model(input_ids=ids, labels=ids).loss
+    forward_reads = runtime.stats()["expert_fetches"]
+    loss.backward()
+    # Under the checkpointed decoder layer a routed expert is read three times:
+    # forward, the checkpoint's recompute, and the expert's own backward.
+    assert runtime.stats()["expert_fetches"] == 3 * forward_reads > 0
     ref(input_ids=ids, labels=ids).loss.backward()
 
     def grads(net):
@@ -521,6 +690,43 @@ def _holder(experts):
 # --------------------------------------------------------------------------
 # NF4 experts (CUDA)
 # --------------------------------------------------------------------------
+@CUDA
+def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
+    """The NF4 path of shard_checkpoint(expert_layout="per_expert") end to end."""
+    import torch
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+    from soup_cli.utils.layer_stream_runtime import (
+        build_meta_skeleton,
+        build_streamed_model,
+        quantised_layer_suffixes,
+    )
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    weights, _ = _tiny_deepseek_v3(tmp_path)
+    probe = build_meta_skeleton(weights, dtype="bfloat16", quant="nf4")
+    suffixes = quantised_layer_suffixes(probe)
+    del probe
+    index = shard_checkpoint(
+        weights, str(tmp_path / "shards"), dtype="bfloat16", arch="deepseek_v3", quant="nf4",
+        quant_suffixes=suffixes, quant_device="cuda", num_hidden_layers=3,
+        expert_layout="per_expert",
+    )
+    assert index.expert_quant_specs["gate_up"].nested is True
+    model, runtime = build_streamed_model(
+        model_id=weights, shard_dir=str(tmp_path / "shards"), index=index,
+        lora_config=_lora(), device="cuda", dtype="bfloat16", buffers=2, pin=False,
+        quant="nf4", double_quant=True,
+    )
+    ids = torch.randint(0, 128, (1, 12), generator=torch.Generator().manual_seed(1)).cuda()
+    loss = model(input_ids=ids, labels=ids).loss
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert runtime.stats()["expert_fetches"] > 0
+    runtime.close()
+
+
 @CUDA
 def test_nf4_streamed_experts_equal_the_dequantised_resident_block(tmp_path):
     import torch
@@ -609,6 +815,9 @@ def test_synthetic_tiny_store_is_a_cache_the_runtime_accepts(tmp_path):
     with safe_open(layer_paths(store, index)[1], framework="pt") as handle:
         keys = set(handle.keys())
     assert "self_attn.q_a_proj.weight::absmax" in keys
+    assert "self_attn.q_a_proj.weight::nested_offset" in keys
+    assert index.double_quant is True
+    assert index.expert_quant_specs["down"].nested is True
     assert "mlp.shared_experts.down_proj.weight" in keys
     assert "mlp.gate.e_score_correction_bias" in keys
 
