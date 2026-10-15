@@ -220,6 +220,74 @@ def test_reader_direct_and_buffered_reads_agree(tmp_path):
         reader.close()
 
 
+@pytest.mark.parametrize("expert", [-1, 3, 4])
+def test_read_host_refuses_an_expert_outside_the_file(tmp_path, expert):
+    """-1 would otherwise read the last expert through Python's negative index."""
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    pairs = [(torch.randn(6, 4), torch.randn(4, 3)) for _ in range(3)]
+    info = write_expert_shard(path, pairs, quantise=False)
+    reader = ExpertShardReader(path, count=3, shapes=info.shapes, quant_specs={}, dtype="float32")
+    with pytest.raises(IndexError, match=r"outside \[0, 3\)"):
+        reader.read_host(expert, aligned_staging(reader.max_span)[1])
+    reader.close()
+
+
+def test_a_reader_holds_no_handle_until_its_first_fetch(tmp_path):
+    """An install that fails after the readers were built must not leave the
+    experts files open (Windows keeps an open file locked until collection)."""
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    reader = ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
+    assert reader._handle is None
+    staging = aligned_staging(reader.max_span)[1]
+    reader.read_host(0, staging)
+    first = reader._handle
+    assert first is not None
+    reader.read_host(0, staging)
+    # One handle for the reader's life: a reopen per fetch would leak the last one.
+    assert reader._handle is first
+    reader.close()
+    assert reader._handle is None
+
+
+def test_a_file_replaced_after_the_header_was_read_is_refused_at_first_fetch(tmp_path):
+    import os
+
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    reader = ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
+    replacement = str(tmp_path / "other.safetensors")
+    write_expert_shard(replacement, [(torch.ones(6, 4), torch.ones(4, 3))], quantise=False)
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="changed on disk since its header was read"):
+        reader.read_host(0, aligned_staging(reader.max_span)[1])
+    assert reader._handle is None
+
+
 def test_install_refuses_mismatched_layers_and_expert_adapters(tmp_path):
     import torch.nn as nn
 
@@ -592,7 +660,11 @@ def test_streamed_per_expert_forward_matches_resident_eager_bit_exactly(tmp_path
     assert torch.equal(got.logits, want.logits), (got.logits - want.logits).abs().max().item()
     assert torch.equal(got.loss, want.loss)
     assert runtime.stats()["expert_fetches"] > 0
+    assert runtime.expert_readers
+    assert all(reader._handle is not None for reader in runtime.expert_readers)
     runtime.close()
+    # Closing the runtime releases every experts file (Windows keeps an open file locked).
+    assert all(reader._handle is None for reader in runtime.expert_readers)
 
 
 def test_streamed_per_expert_backward_matches_resident_lora_gradients(tmp_path):
@@ -693,6 +765,7 @@ def _holder(experts):
 @CUDA
 def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
     """The NF4 path of shard_checkpoint(expert_layout="per_expert") end to end."""
+    pytest.importorskip("bitsandbytes")
     import torch
 
     from soup_cli.utils.layer_shard import shard_checkpoint
@@ -702,8 +775,6 @@ def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
         quantised_layer_suffixes,
     )
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     weights, _ = _tiny_deepseek_v3(tmp_path)
     probe = build_meta_skeleton(weights, dtype="bfloat16", quant="nf4")
     suffixes = quantised_layer_suffixes(probe)
@@ -729,6 +800,7 @@ def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
 
 @CUDA
 def test_nf4_streamed_experts_equal_the_dequantised_resident_block(tmp_path):
+    pytest.importorskip("bitsandbytes")
     import torch
     from bitsandbytes.functional import dequantize_4bit, quantize_4bit
 
@@ -740,8 +812,6 @@ def test_nf4_streamed_experts_equal_the_dequantised_resident_block(tmp_path):
     )
     from soup_cli.utils.layer_shard import NF4_CODE_KEY, NF4_NESTED_CODE_KEY
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     module, n_experts, top_k = _deepseek_v3_experts(5)
     module = module.to("cuda", torch.bfloat16)
     path = str(tmp_path / "experts_001.safetensors")
@@ -834,10 +904,7 @@ def test_synthetic_writer_refuses_an_existing_cache(tmp_path, capsys):
 def test_one_step_on_the_synthetic_tiny_store(tmp_path):
     import json
 
-    import torch
-
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    pytest.importorskip("bitsandbytes")
     store = str(tmp_path / "store")
     _harness("synth_moe_store").write_store(store, "tiny", log=lambda _line: None)
     out = tmp_path / "step.json"

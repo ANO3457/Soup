@@ -178,10 +178,13 @@ class ExpertShardReader:
     when the platform has it, so a store far larger than RAM does not churn the
     page cache of the whole box; buffered reads otherwise.
 
-    The file is opened once, here, and the header is read through the same
-    file identity, so a file swapped between the header read and the first
-    fetch is refused, not read at stale offsets. The handle stays open for the
-    reader's life, which on Windows also keeps the file from being replaced.
+    The header is read through the identity of a handle opened for it, and the
+    handle is closed again before ``__init__`` returns: a reader holds no OS
+    handle until its first fetch, so an install that fails after the readers
+    were built leaks nothing. The first fetch reopens the file and refuses it
+    unless its identity is still the one the header was read from, so a file
+    swapped in between is never read at stale offsets. From then on the handle
+    stays open, which on Windows also keeps the file from being replaced.
     Every stored tensor's size is checked against the index (dense shape, NF4
     spec), so a header-valid file cannot steer a read or a dequantisation past
     the bytes it really holds.
@@ -214,11 +217,13 @@ class ExpertShardReader:
         self.direct = direct
         self._handle: Optional[Any] = None
         name = os.path.basename(path)
+        self._identity: Optional[Any] = None
         handle = self._open()
         header, identity = read_header_with_identity(path)
         if identity_of(handle) != identity:
             self.close()
             raise ValueError(f"experts file {name} changed while it was being opened")
+        self._identity = identity
         self._size = identity.size
         expected = {
             part: _expected_tensors(
@@ -281,6 +286,7 @@ class ExpertShardReader:
         self.max_span = largest
         self.fetches = 0
         self.bytes_read = 0
+        self.close()
 
     def _open(self) -> Any:
         if self._handle is None:
@@ -294,6 +300,15 @@ class ExpertShardReader:
                     self.direct = False
             if self._handle is None:
                 self._handle = open(self.path, "rb", buffering=0)
+            if self._identity is not None:
+                from soup_cli.utils.safetensors_reader import identity_of
+
+                if identity_of(self._handle) != self._identity:
+                    self.close()
+                    raise ValueError(
+                        f"experts file {os.path.basename(self.path)} changed on disk since "
+                        f"its header was read — reshard the checkpoint and restart"
+                    )
         return self._handle
 
     def read_host(self, expert: int, staging: Any) -> Dict[str, Any]:
@@ -407,7 +422,9 @@ class ExpertFetcher:
     """Turns stored expert tensors into dense weights on the compute device.
 
     Owns the one host staging buffer every reader it serves reads into, so a
-    60-layer store costs one expert's span of host RAM, not sixty.
+    60-layer store costs one expert's span of host RAM, not sixty. Not
+    thread-safe: one fetch at a time (the streamed forward and backward are
+    sequential); a concurrent fetch would overwrite the staging under another.
     """
 
     def __init__(self, *, device: str, dtype: str, codes: Optional[Mapping[str, Any]] = None):

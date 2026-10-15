@@ -126,9 +126,9 @@ Against section 2.1, both steps finish:
 
 ## 5. Verdict
 
-**COMPLETES.** On an RTX 5070 Laptop (8 GB) with 31.7 GB of RAM, layer streaming plus expert-granularity streaming runs a full LoRA training step (forward, backward, AdamW) of a Kimi K2-shaped model: 1,026,408,232,448 parameters, random weights, 533 GB NF4 on NVMe. Peak VRAM is 4.7 GB.
+**COMPLETES.** On an RTX 5070 Laptop (8 GB) with 31.7 GB of RAM, layer streaming plus expert-granularity streaming runs a full LoRA training step (forward, backward, AdamW) of a Kimi K2-shaped model: 1,026,408,232,448 parameters, random weights, 533 GB NF4 on NVMe. Peak VRAM is 4,723 MiB.
 
-**A step takes 15-18.5 minutes when every expert is routed (run 2); a trained model routes nearly every expert (#992).** That is a capacity demonstration, not a training regime: at 512 tokens per step it is ~0.5 tokens/s. The time is the read volume, 1.57 TB per step, three passes over the experts. L2L (Pudipeddi et al. 2020) is the published way to amortise those reads across micro-batches, and this run does not use it.
+**A step takes 14.5-18.5 minutes (867.95 s and 1,108.77 s) when every expert is routed (run 2); a trained model routes nearly every expert (#992).** That is a capacity demonstration, not a training regime: at 512 tokens per step it is ~0.5 tokens/s. The time is the read volume, 1.57 TB per step, three passes over the experts. L2L (Pudipeddi et al. 2020) is the published way to amortise those reads across micro-batches, and this run does not use it.
 
 **Not shown:**
 - convergence or quality: the weights are random;
