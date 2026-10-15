@@ -255,8 +255,13 @@ def test_a_reader_holds_no_handle_until_its_first_fetch(tmp_path):
     info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
     reader = ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
     assert reader._handle is None
-    reader.read_host(0, aligned_staging(reader.max_span)[1])
-    assert reader._handle is not None
+    staging = aligned_staging(reader.max_span)[1]
+    reader.read_host(0, staging)
+    first = reader._handle
+    assert first is not None
+    reader.read_host(0, staging)
+    # One handle for the reader's life: a reopen per fetch would leak the last one.
+    assert reader._handle is first
     reader.close()
     assert reader._handle is None
 
