@@ -44,6 +44,12 @@ def _args(argv=None):
     parser.add_argument("--no-pin", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--label", default="random weights, shape only")
+    parser.add_argument(
+        "--route", choices=("model", "uniform"), default="model",
+        help="uniform: every MoE router sends token t to experts 8t..8t+k-1 (mod E), so a "
+        "step routes to every expert the way a trained model nearly does (probe #992); "
+        "random weights otherwise collapse routing onto a few experts",
+    )
     return parser.parse_args(argv)
 
 
@@ -67,6 +73,39 @@ def _shard(args):
         notify=print,
     )
     return round(time.perf_counter() - started, 1)
+
+
+def _uniform_routing(model):
+    """Replace every DeepSeek-V3 router's choice with a fixed round robin.
+
+    Returns the number of routers replaced. The router's own weight still
+    streams (it is in the layer file) but is not used; the expert MLPs, the
+    shared expert and the attention are untouched.
+    """
+    import types
+
+    import torch
+
+    replaced = 0
+    for module in model.modules():
+        if type(module).__name__ != "DeepseekV3TopkRouter":
+            continue
+        top_k, experts = int(module.top_k), int(module.num_experts)
+
+        def forward(self, hidden_states, top_k=top_k, experts=experts):
+            rows = hidden_states.reshape(-1, hidden_states.shape[-1]).shape[0]
+            device = hidden_states.device
+            index = (
+                torch.arange(rows, device=device)[:, None] * top_k
+                + torch.arange(top_k, device=device)[None, :]
+            ) % experts
+            weights = torch.full((rows, top_k), 1.0 / top_k, device=device)
+            logits = torch.zeros(rows, experts, device=device)
+            return logits, weights, index
+
+        module.forward = types.MethodType(forward, module)
+        replaced += 1
+    return replaced
 
 
 def _peak_host_bytes():
@@ -113,6 +152,9 @@ def main(argv=None):
     )
     report["build_seconds"] = round(time.perf_counter() - started, 2)
     model.train()
+    if args.route == "uniform":
+        report["routers_overridden"] = _uniform_routing(model)
+        report["label"] += "; routing forced uniform (token t -> experts kt..kt+k-1 mod E)"
     trainable = [param for param in model.parameters() if param.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=1e-4)
     report["trainable_params"] = sum(param.numel() for param in trainable)

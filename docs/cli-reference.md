@@ -2332,7 +2332,7 @@ Usage: `soup export [OPTIONS]`
 | Name | Type | Default | Required | Help |
 |---|---|---|---|---|
 | `--model`, `-m` | text |  | yes | Path to model directory (full model or LoRA adapter) |
-| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0 (awq and gptq are deprecated and will be removed in Soup v0.77) |
+| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0, torchao, gguf-ud (torchao needs --quant-config; awq and gptq are deprecated and will be removed in Soup v0.77) |
 | `--quant`, `-q` | text | `q4_k_m` |  | Quantization type: q4_0, q4_k_m, q5_k_m, q8_0, f16, f32 |
 | `--output`, `-o` | text |  |  | Output file path. Default: &lt;model-name>.&lt;quant>.gguf |
 | `--base`, `-b` | text |  |  | Base model ID (for LoRA adapters). Auto-detected if not set. |
