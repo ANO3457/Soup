@@ -1,6 +1,6 @@
 # Probe: LoRA on Moonlight-16B-A3B (DeepSeek-V3 architecture) with streaming, RTX 5070 Laptop 8 GB
 
-Status: **both arms COMPLETE** (runs 2026-10-14 18:53Z-18:59Z). The rule in section 2 was committed in d1396a508 before any run; the product-path check is still to run.
+Status: **both arms COMPLETE** (runs 2026-10-14 18:53Z-18:59Z). The rule in section 2 was committed in d1396a508 before any run. The product-path check COMPLETES too (section 4.1, 2026-10-15).
 
 `moonshotai/Moonlight-16B-A3B`: `model_type: deepseek_v3` (checked in its
 `config.json` before anything was built), 27 layers, 64 routed experts + 2 shared
@@ -73,6 +73,32 @@ Real weights, random token ids, seq 512, batch 1, LoRA r 8 on `q_proj` / `kv_a_p
 - Arm L's last step in r2 (17.36 s) is an outlier at twice its neighbours. It is reported, not dropped; the median absorbs it.
 - An expert read is one expert fetched once.
 - 26 MoE layers x 64 experts x 3 passes (forward, checkpoint recompute, backward) caps a step at 4,992 reads. The 4,086-4,296 measured means random ids routed to ~82-86% of the experts per pass.
+
+### 4.1 Product path: `soup train`
+
+2026-10-15 08:36:52Z to 08:45:39Z, AC power, 14 GB RAM free before, GPU idle, the other
+sessions told beforehand. Code at 2846155470 (branch `feat/moe-moonlight`). Command:
+`soup train --config soup.yaml --trust-remote-code --yes`, run from `D:/soup-bench` with
+`SOUP_LAYER_STREAM_CACHE_DIR=D:/soup-bench/soup-cache`.
+
+The config:
+- base: the local Moonlight-16B-A3B checkpoint;
+- `task: sft` on `examples/data/alpaca_tiny.jsonl` (9 train rows, 1 validation row);
+- `max_length 512`, `epochs 3`, `batch_size 1`, `quantization: 4bit`;
+- `stream_layers: true`, `stream_source: auto`;
+- LoRA r 8 on `q_proj`, `kv_a_proj_with_mqa`, `kv_b_proj`, `o_proj`.
+
+`--trust-remote-code` reaches only the tokenizer, which Moonlight ships as remote code; the
+model is transformers' own class (this branch's fix).
+
+What Soup reported:
+- **Tier and VRAM plan.** `stream_source: auto` fell back to the NVMe disk tier, because the 30.60 GB store does not fit in RAM. The VRAM plan was 2 x 1,159 MB layer buffers plus a 671 MB vocabulary slot, with a predicted peak of ~4.32 GB; the reported peak was 3.1 of 7.9 GB.
+- **Steps.** 27 steps in 422.7 s, ~15.7 s per step, with short alpaca rows.
+- **Loss.** Training loss 4.922 at step 10, then 3.124 at step 20; mean train loss 3.866; validation loss after epoch 3 was 3.472.
+- **Adapter.** Written: `adapter_model.safetensors`, 7,134,912 bytes, plus `checkpoint-27`.
+
+**COMPLETES:** finite loss, adapter written. A 9-row dataset says nothing about quality; this
+shows that the CLI path, from config to adapter, runs on this base on an 8 GB card.
 
 ## 5. Verdict
 
