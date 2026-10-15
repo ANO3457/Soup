@@ -761,6 +761,7 @@ def _holder(experts):
 @CUDA
 def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
     """The NF4 path of shard_checkpoint(expert_layout="per_expert") end to end."""
+    pytest.importorskip("bitsandbytes")
     import torch
 
     from soup_cli.utils.layer_shard import shard_checkpoint
@@ -770,8 +771,6 @@ def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
         quantised_layer_suffixes,
     )
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     weights, _ = _tiny_deepseek_v3(tmp_path)
     probe = build_meta_skeleton(weights, dtype="bfloat16", quant="nf4")
     suffixes = quantised_layer_suffixes(probe)
@@ -797,6 +796,7 @@ def test_sharder_writes_nf4_per_expert_files_a_streamed_model_runs_on(tmp_path):
 
 @CUDA
 def test_nf4_streamed_experts_equal_the_dequantised_resident_block(tmp_path):
+    pytest.importorskip("bitsandbytes")
     import torch
     from bitsandbytes.functional import dequantize_4bit, quantize_4bit
 
@@ -808,8 +808,6 @@ def test_nf4_streamed_experts_equal_the_dequantised_resident_block(tmp_path):
     )
     from soup_cli.utils.layer_shard import NF4_CODE_KEY, NF4_NESTED_CODE_KEY
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     module, n_experts, top_k = _deepseek_v3_experts(5)
     module = module.to("cuda", torch.bfloat16)
     path = str(tmp_path / "experts_001.safetensors")
@@ -902,10 +900,7 @@ def test_synthetic_writer_refuses_an_existing_cache(tmp_path, capsys):
 def test_one_step_on_the_synthetic_tiny_store(tmp_path):
     import json
 
-    import torch
-
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    pytest.importorskip("bitsandbytes")
     store = str(tmp_path / "store")
     _harness("synth_moe_store").write_store(store, "tiny", log=lambda _line: None)
     out = tmp_path / "step.json"
