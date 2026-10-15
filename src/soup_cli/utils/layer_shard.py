@@ -295,7 +295,10 @@ class ShardIndex:
     #: "" keeps a MoE layer's routed experts inside its decoder-layer file (the
     #: fused 3-D tensors); "per_expert" writes them to ``experts_NNN.safetensors``
     #: beside the layer file, one tensor pair per expert, streamed one expert at
-    #: a time (``utils/expert_stream.py``).
+    #: a time (``utils/expert_stream.py``). Deliberately NOT a format-version
+    #: bump (that would invalidate every existing cache): a Soup from before this
+    #: field reads a per_expert cache as fused and refuses it at install with
+    #: "shard is missing decoder weights"; reshard with that version to use it.
     expert_layout: str = ""
     #: per_expert: the decoder layers that have an experts file, ascending.
     expert_layers: Tuple[int, ...] = ()

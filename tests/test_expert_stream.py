@@ -220,6 +220,69 @@ def test_reader_direct_and_buffered_reads_agree(tmp_path):
         reader.close()
 
 
+@pytest.mark.parametrize("expert", [-1, 3, 4])
+def test_read_host_refuses_an_expert_outside_the_file(tmp_path, expert):
+    """-1 would otherwise read the last expert through Python's negative index."""
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    pairs = [(torch.randn(6, 4), torch.randn(4, 3)) for _ in range(3)]
+    info = write_expert_shard(path, pairs, quantise=False)
+    reader = ExpertShardReader(path, count=3, shapes=info.shapes, quant_specs={}, dtype="float32")
+    with pytest.raises(IndexError, match=r"outside \[0, 3\)"):
+        reader.read_host(expert, aligned_staging(reader.max_span)[1])
+    reader.close()
+
+
+def test_a_reader_holds_no_handle_until_its_first_fetch(tmp_path):
+    """An install that fails after the readers were built must not leave the
+    experts files open (Windows keeps an open file locked until collection)."""
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    reader = ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
+    assert reader._handle is None
+    reader.read_host(0, aligned_staging(reader.max_span)[1])
+    assert reader._handle is not None
+    reader.close()
+    assert reader._handle is None
+
+
+def test_a_file_replaced_after_the_header_was_read_is_refused_at_first_fetch(tmp_path):
+    import os
+
+    import torch
+
+    from soup_cli.utils.expert_stream import (
+        ExpertShardReader,
+        aligned_staging,
+        write_expert_shard,
+    )
+
+    path = str(tmp_path / "experts_001.safetensors")
+    info = write_expert_shard(path, [(torch.zeros(6, 4), torch.zeros(4, 3))], quantise=False)
+    reader = ExpertShardReader(path, count=1, shapes=info.shapes, quant_specs={}, dtype="float32")
+    replacement = str(tmp_path / "other.safetensors")
+    write_expert_shard(replacement, [(torch.ones(6, 4), torch.ones(4, 3))], quantise=False)
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="changed on disk since its header was read"):
+        reader.read_host(0, aligned_staging(reader.max_span)[1])
+    assert reader._handle is None
+
+
 def test_install_refuses_mismatched_layers_and_expert_adapters(tmp_path):
     import torch.nn as nn
 
