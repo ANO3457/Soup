@@ -660,7 +660,11 @@ def test_streamed_per_expert_forward_matches_resident_eager_bit_exactly(tmp_path
     assert torch.equal(got.logits, want.logits), (got.logits - want.logits).abs().max().item()
     assert torch.equal(got.loss, want.loss)
     assert runtime.stats()["expert_fetches"] > 0
+    assert runtime.expert_readers
+    assert all(reader._handle is not None for reader in runtime.expert_readers)
     runtime.close()
+    # Closing the runtime releases every experts file (Windows keeps an open file locked).
+    assert all(reader._handle is None for reader in runtime.expert_readers)
 
 
 def test_streamed_per_expert_backward_matches_resident_lora_gradients(tmp_path):
