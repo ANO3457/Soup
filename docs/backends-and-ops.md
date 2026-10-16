@@ -24,6 +24,8 @@
 - [Health Check](#health-check)
 - [Version Info](#version-info)
 - [Error Handling](#error-handling)
+- [Unknown config keys](#unknown-config-keys)
+- [Config size limits](#config-size-limits)
 - [Experiment Tracking](#experiment-tracking)
 - [Profiling Extras](#profiling-extras)
 - [VS Code Setup (`.vscode/launch.json`)](#vs-code-setup-vscodelaunchjson)
@@ -247,7 +249,11 @@ until it reports that termination succeeded; shutting down the guest does not te
 Pressing Ctrl+C during `--cloud-submit` interrupts the controller, which still runs that `finally`
 block, and `soup` waits for it to terminate the instance and exit rather than killing it; the only
 way to skip that cleanup is to kill the controller process itself (for example with `kill` from
-another terminal), which can leave the instance running.
+another terminal), which can leave the instance running. If remote training fails with a non-zero exit
+code, the controller fetches the last 50 lines of `/home/ubuntu/soup/train.log` over SSH (capped at 50 KB
+and sanitized of terminal control sequences) and prints them before terminating the instance so
+the root cause is immediately visible (the log file holds only `soup train` output; an earlier failure
+during cloud-init or `pip install` is not captured in it).
 
 Register the public half of an SSH key with Lambda first, then set:
 
@@ -556,6 +562,14 @@ soup doctor [--nccl]
 
 Shows: Python version, GPU availability, system resources (RAM/Disk), all dependency versions, and fix suggestions. Use `--nccl` to measure and check multi-GPU communication bandwidth against expected hardware ceilings.
 
+With `soup doctor --config soup.yaml`, the declared support report lists only
+explicitly written, active settings that differ from their schema defaults.
+Writing a default counts as leaving it unwritten, so a full YAML dump and its
+minimal source have the same report; `seed: 0` still counts because the seed
+default is unset. Settings refused at config load are not listed as doctor rows:
+their active values fail before the report can run. This report describes the
+reviewed gaps, not a guarantee that every unlisted setting is supported.
+
 ### GPU diagnostics
 
 When an NVIDIA GPU is available, `soup doctor` reports its compute capability
@@ -652,6 +666,13 @@ The whole sweep is refused before the first arm starts, and the command exits no
 a scripted or CI-driven sweep fails rather than reporting a grid of arms that each failed
 for the same reason. A sweep whose swept knob is never applied produces arms that are all
 identical, so there is no partially-useful result to preserve by continuing.
+
+
+## Config size limits
+
+A config file may be at most 1 MiB, nest mappings and lists at most 100 levels,
+and expand through anchors, aliases and `<<` merge keys to at most one node per byte plus 10,000.
+A file over a limit is refused with a message naming the file and the limit (`soup ship`: 4 MiB).
 
 
 ## Experiment Tracking
