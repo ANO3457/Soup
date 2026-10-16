@@ -366,6 +366,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
       - name: Install only the MLX runtime and smoke-test dependency
         # Ends with `plan`'s stack (above `plan`); a constraint installs nothing, so torch stays absent.
         run: pip install -e ".[mlx]" pytest ${{ needs.plan.outputs.constraints }}
@@ -395,6 +399,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
       - name: Install the QAT extra (torchao) beside the dev stack
         # One spec with both extras: `-e ".[dev]" ".[qat]"` asks pip for
         # soup-cli twice, once editable and once not, and resolution fails.
@@ -433,6 +441,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
 
       - name: Set HF cache location
         run: echo "HF_HOME=$RUNNER_TEMP/hf-cache" >> "$GITHUB_ENV"
@@ -494,6 +506,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
       - name: Install with Transformers floor constraints
         run: pip install -e ".[dev,audio]" -c .github/constraints/transformers-floor.txt
       - name: Verify constrained dependency graph
@@ -586,6 +602,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
       # The Web UI escaping tests run `safe_html.js` under node, and skip when
       # node is absent. Runner images happen to ship one, so the skip would be
       # silent: pin it, or the only tests that execute the real escaping logic

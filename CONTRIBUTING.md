@@ -630,6 +630,13 @@ bound in `pyproject.toml` past one of those pins, move the pin in the same pull
 request: `tests/test_ci_pinned_upstream.py` names the pin, and the header of the
 constraints file says how to pick the new version.
 
+**CI reuses pip downloads.** The test cells, MLX smoke, torchao contract,
+PyTorch smoke and Transformers floor jobs cache pip's downloads and wheels via
+`setup-python`, keyed by `pyproject.toml` and `.github/constraints/*.txt`.
+Every job still runs its installation command on a cache hit, so the nightly
+run continues to resolve the newest allowed packages and the floor job keeps
+its constraints. Virtual environments and the HF model cache are separate.
+
 **CI runs the tests in parallel.** Every `test (...)` cell runs the suite with
 `pytest-xdist`, one test file per worker process (`-n logical --dist loadfile`).
 The tests of one file still run in order in one process, but two files can run
