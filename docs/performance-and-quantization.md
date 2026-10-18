@@ -469,6 +469,17 @@ checkpointed step. The fused arm reduces saved-weight VRAM but its backward stil
 dequantises because bitsandbytes exposes no transposed 4-bit GEMM; it is therefore a
 bounded memory/time trade, not a claim that #842's full kernel ceiling is complete.
 
+**Expert-granularity streaming (DeepSeek-V3-family MoE, API/harness only).** For
+admitted DeepSeek-V3 checkpoints with per-expert source weights, `shard_checkpoint(..., expert_layout="per_expert")`
+stores routed experts separately so the runtime fetches one frozen expert at a time
+instead of holding the full routed-expert block in the layer buffer. This is a
+capacity option for unusually large MoE layers; it does not add a CLI or config knob.
+The current harness trains LoRA on attention projections: LoRA on streamed routed
+experts is unsupported, while attention and shared-expert LoRA remain resident. The
+fit planner still estimates the fused layer and does not account for per-expert
+streaming, so its recommendation is not an estimate of this layout's capacity. No
+production throughput claim is made; see the [expert streaming gate](../benchmarks/gate-expert-streaming.md).
+
 **`stream_nf4_scale_cache` (opt-in).** On the dequantise + `F.linear` path, a
 double-quantised NF4 weight expands its 8-bit block scales to fp32 on every visit,
 forward and recompute alike: two small kernels and a temporary per projection.
