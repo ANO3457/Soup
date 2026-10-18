@@ -935,6 +935,9 @@ Listed by first contribution. PR numbers link the work.
 - **DBVamsi** ([@DBVamsi](https://github.com/DBVamsi))
   - Refused `training.neftune_alpha` at config load on tasks that never apply it, and documented the supported tasks ([#1820](https://github.com/MakazhanAlpamys/Soup/issues/1820), [#1883](https://github.com/MakazhanAlpamys/Soup/pull/1883))
 
+- **dipesh-singh07** ([@dipesh-singh07](https://github.com/dipesh-singh07))
+  - Made oversized integer baseline scores follow the existing usage-error path across the writer, reader and eval gate; the shared finite-score helper preserves healthy controls, and removing the overflow handler fails 14 regressions ([#1865](https://github.com/MakazhanAlpamys/Soup/issues/1865), [#1903](https://github.com/MakazhanAlpamys/Soup/pull/1903)).
+
 ---
 
 Want to join this list? See [CONTRIBUTING.md](CONTRIBUTING.md) — good first issues are
