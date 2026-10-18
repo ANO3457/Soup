@@ -24,6 +24,8 @@
 - [Health Check](#health-check)
 - [Version Info](#version-info)
 - [Error Handling](#error-handling)
+- [Unknown config keys](#unknown-config-keys)
+- [Config size limits](#config-size-limits)
 - [Experiment Tracking](#experiment-tracking)
 - [Profiling Extras](#profiling-extras)
 - [VS Code Setup (`.vscode/launch.json`)](#vs-code-setup-vscodelaunchjson)
@@ -198,6 +200,8 @@ training:
 ```
 
 Works with the tasks that have an unsloth setup: SFT (text; SFT vision and audio still run the transformers setup), DPO, GRPO, PPO, KTO, ORPO, SimPO, IPO, BCO, preference, Pretrain, Embedding and TTS. The others (`reward_model`, `prm`, `classifier`, `reranker`, `cross_encoder`, `distill`, `unlearn`, `moe_lora_routing`, `online_dpo` and `asr`) have no unsloth setup, so `backend: unsloth` is refused at config load for them (#1357). If unsloth is installed but not enabled, Soup suggests it, but only for a config that would still load with `backend: unsloth` (#1736): a config one of these refusals would stop gets no suggestion.
+
+`quantization: 8bit` with `backend: unsloth` is refused at config load: Soup's Unsloth loader passes `load_in_4bit` only, so `8bit` used to load the model in 16-bit with no word (#1811). Use `4bit` or `none` on this backend, or `backend: transformers` for 8-bit.
 
 > **Tip:** Soup auto-detects unsloth. When it is installed, `soup train` prints a hint if you haven't enabled it yet and your config would load with it.
 
@@ -665,7 +669,10 @@ a scripted or CI-driven sweep fails rather than reporting a grid of arms that ea
 for the same reason. A sweep whose swept knob is never applied produces arms that are all
 identical, so there is no partially-useful result to preserve by continuing.
 
-**Size limits.** A config file may be at most 1 MiB, nest mappings and lists at most 100 levels,
+
+## Config size limits
+
+A config file may be at most 1 MiB, nest mappings and lists at most 100 levels,
 and expand through anchors, aliases and `<<` merge keys to at most one node per byte plus 10,000.
 A file over a limit is refused with a message naming the file and the limit (`soup ship`: 4 MiB).
 

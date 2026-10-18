@@ -13,8 +13,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from soup_cli.data.loader import _resolve_media_entries, load_raw_data, non_object_row_issue
-from soup_cli.data.validator import _MAX_REASON_SAMPLES, validate_and_stats
+from soup_cli.data.loader import (
+    SkippedRows,
+    SkipTally,
+    _resolve_media_entries,
+    load_raw_data,
+    non_object_row_issue,
+)
+from soup_cli.data.validator import validate_and_stats
 from soup_cli.utils.embed import DEFAULT_EMBED_MODEL, embed_texts
 from soup_cli.utils.exit_codes import EXIT_GATE_FAILED, EXIT_USAGE_ERROR, GateCommand
 from soup_cli.utils.paths import is_under_cwd
@@ -109,8 +115,13 @@ def validate(
             )
             raise typer.Exit(EXIT_USAGE_ERROR)
 
-    load_issues: list[str] = []
+    load_issues = SkippedRows()
     data = load_raw_data(file_path, issues=load_issues)
+    # #1887: every row the loader skipped (not an object, or not JSON) is an
+    # invalid row for the N/M line, for --min-valid-fraction and for the exit
+    # code. The statistics below still describe the retained objects.
+    skipped = load_issues.total
+    none_remain = f"no object rows remain: {skipped} row(s) skipped (listed above)"
 
     # Auto-detect format if not specified
     if fmt == "auto":
@@ -120,13 +131,21 @@ def validate(
             fmt = detect_format(data)
             console.print(f"[dim]Auto-detected format: {for_terminal(fmt)}[/]")
         except ValueError as exc:
-            console.print(f"[red]{for_terminal(str(exc))}[/]")
+            message = str(exc)
+            if not data and skipped:
+                message = f"{none_remain}; cannot detect a format. Pass --format to validate."
+            console.print(f"[red]{for_terminal(message)}[/]")
             raise typer.Exit(EXIT_USAGE_ERROR)
 
     result = validate_and_stats(data, expected_format=fmt)
-    load_issue_samples = load_issues[:_MAX_REASON_SAMPLES]
-    if len(load_issues) > _MAX_REASON_SAMPLES:
-        load_issue_samples.append(f"... and {len(load_issues) - _MAX_REASON_SAMPLES} more")
+    if not data and skipped:
+        result["issues"] = [none_remain if i == "Dataset is empty" else i
+                            for i in result["issues"]]
+    # The loader keeps up to _MAX_REASON_SAMPLES messages per kind, so list them all
+    # and report the exact remainder.
+    load_issue_samples = list(load_issues)
+    if load_issues.total > len(load_issue_samples):
+        load_issue_samples.append(f"... and {load_issues.total - len(load_issue_samples)} more")
     result["issues"] = load_issue_samples + result["issues"]
 
     if result["issues"]:
@@ -137,7 +156,7 @@ def validate(
         console.print("[bold green]Dataset is valid![/]")
 
     valid = result["valid_rows"]
-    total = result["total"]
+    total = result["total"] + skipped
     console.print(f"\n[green]{valid}/{total} rows valid for {for_terminal(fmt)} format[/]")
 
     if total > 0 and valid == 0:
@@ -2270,6 +2289,7 @@ def review_cmd(
         raise typer.Exit(1)
 
     shown = 0
+    non_objects = SkipTally("lines skipped (JSON values that are not objects)")
     with path.open("r", encoding="utf-8") as fh:
         for line_number, line in enumerate(fh, start=1):
             if shown >= sample:
@@ -2282,8 +2302,7 @@ def review_cmd(
             except _json.JSONDecodeError:
                 continue
             if not isinstance(entry, dict):
-                issue = non_object_row_issue(entry, line_number)
-                console.print(f"[yellow]Warning: {issue}[/]")
+                non_objects.add(non_object_row_issue(entry, line_number))
                 continue
             prompt = str(entry.get("prompt", ""))
             chosen = str(entry.get("chosen", ""))
@@ -2297,6 +2316,7 @@ def review_cmd(
             ))
             shown += 1
 
+    non_objects.finish()
     if shown == 0:
         console.print("[yellow]No pairs found in file.[/]")
 

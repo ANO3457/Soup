@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from soup_cli.eval.generation import generate_outputs
 from soup_cli.utils.final_answer import answers_match, parse_completion, parse_reference
 from soup_cli.utils.safe_regex import check_config_regex
 
@@ -120,7 +121,7 @@ def load_eval_tasks(path: "Path | str") -> list[EvalTask]:
                 )
 
             scoring = row.get("scoring", "exact")
-            if scoring not in VALID_SCORING:
+            if not isinstance(scoring, str) or scoring not in VALID_SCORING:
                 raise ValueError(
                     f"Line {line_num}: invalid scoring '{scoring}', "
                     f"must be one of: {', '.join(sorted(VALID_SCORING))}"
@@ -365,8 +366,8 @@ def run_eval(
     Args:
         model_path: Path to model directory.
         tasks: List of EvalTask objects.
-        generate_fn: Optional callable(prompt: str) -> str. If None, uses
-            a default pipeline from transformers.
+        generate_fn: Optional callable(prompt: str) -> str, optionally exposing
+            batch(prompts) -> list[str]. If None, uses a transformers pipeline.
 
     Returns:
         EvalResults with per-task scores and aggregates.
@@ -375,9 +376,12 @@ def run_eval(
         generate_fn = _create_default_generator(model_path)
 
     results: list[EvalResult] = []
-    for task in tasks:
-        output = generate_fn(task.prompt)
-        result = score_task(task, output)
+    outputs = generate_outputs(generate_fn, [task.prompt for task in tasks])
+    for task, output in zip(tasks, outputs):
+        result = (
+            score_task(task, output) if output is not None
+            else EvalResult(task=task, output="", score=0.0, matched=False)
+        )
         results.append(result)
 
     eval_results = EvalResults(results=results)

@@ -265,7 +265,14 @@ construction or a verdict. Direct `run_gate` calls also refuse an empty list,
 including a suite emptied after loading. Unknown-key handling and the no-model
 smoke generator are unchanged (#1798).
 
+Task names must be unique by exact string equality; repeated names are refused
+before evaluation or baseline writing, rather than overwriting earlier scores (#1824).
+
 Baselines may be a registry reference (`registry://<name-or-id>`), a file path, or omitted for the first run. A registry baseline uses the newest eval row for each benchmark — re-measuring a benchmark replaces its baseline score — and warns, per benchmark, when that row's scorer stamp is missing or from a different scorer revision. A task whose evaluation raises (`ValueError`, `FileNotFoundError`, `OSError`, or a judge that stays unreachable) gets no score and fails the gate closed under `on_regression: stop`; the log line lists it as a task that could not be scored, with the error, rather than as a regression (#1447).
+
+A zero-byte or whitespace-only judge prompt file is an input error naming the
+task and file. It has no measured score, fails the gate even at threshold zero,
+and cannot create or replace a baseline when no other task was scored.
 
 
 ## Sequential A/B Harness (`soup ab`)
@@ -477,6 +484,25 @@ CPU-instant):
 | `mini_format_json` | JSON validity (a structured object, not a bare scalar) | container-only JSON check |
 | `mini_safety` | refusal-rate on harmful prompts (under-refusal = regression) | refusal heuristic |
 | `mini_over_refusal` | benign prompts are NOT refused (over-refusal = regression) | refusal heuristic (inverse) |
+
+Custom task evaluation and bundled suites accept an ordinary `gen(prompt) -> str`
+callable and also use its optional `gen.batch(prompts) -> list[str]` method. Batch
+results must preserve prompt order and have the same length as the input. If the
+batch raises, scalar retries isolate failed items; a malformed result fails the
+batch and a non-string item fails that item. Generation failures always score zero,
+including when an empty response would otherwise match or count as non-refusal.
+
+The shared live greedy generator used by `soup ship` exposes this method with left
+padding, the same prompt/chat-template preparation as scalar decoding, and bounded
+batches of eight prompts. Python callers can set `make_generator(..., batch_size=1)`
+or another positive size. Each prompt returns one completion even when the model's
+saved generation configuration requests multiple sequences; the shared model
+configuration is not changed. Successful outputs retain the same scores and the default
+CLI output format is unchanged. CPU tests compare real tiny GPT-2 and Llama outputs
+against scalar generation; no GPU throughput or cross-device numerical equivalence
+is claimed. Scorer revision 6 marks the corrected generation-failure handling, so
+older saved baselines receive the existing provenance warning. Progress events are
+a separate follow-up to #1759.
 
 Each suite is >20 items so a single-item flip (1/N < 0.05) trips the default threshold instead
 of being rounded away. The scorer is answer-**extraction** — a spurious substring inside a word
@@ -814,6 +840,12 @@ soup eval leaderboard --format csv
 soup eval human --input prompts.jsonl --model-a ./model_a --model-b ./model_b
 ```
 
+Judge HTTP replies are limited to 1 MiB of decoded content while streaming,
+before JSON parsing, including gzip expansion. An oversized response is an
+unusable reply rather than a transient outage: it is not retried. The error names
+the cap and the endpoint selectors (`--api-base`, `--judge-api-base`, `judge_model`),
+with credentials removed from the judge URL. Existing row-failure policies apply.
+
 `soup eval benchmark` saves only requested names with numeric metrics, including a real
 `0.0` (not a boolean). Missing or scoreless results are skipped, named and counted;
 the saved banner reports the saved count. It exits `0` when at least one result was
@@ -911,6 +943,10 @@ soup eval quant-check --before X --after Y --tasks t.jsonl --allow-stub
 Paths are containment-checked, and `registry://` refs are resolved with an optional `kinds` filter so you never pick the wrong artifact. Standalone `.gguf` file paths are refused up front; pass directory paths containing safetensors/HuggingFace weights or `registry://` references.
 
 ### Custom Eval Format
+
+`scoring` must be a supported string label; omitted values default to `exact`.
+Invalid values name the `scoring` field and physical JSONL line, including blank
+lines, before model loading or result writes. `soup eval custom` exits 1 for these errors.
 
 Regex-scored custom tasks reject structurally unsafe patterns before matching
 model output and name `eval.custom.expected` in the error. The diagnose

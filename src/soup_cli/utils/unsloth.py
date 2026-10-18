@@ -31,12 +31,26 @@ def load_model_and_tokenizer(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     target_modules: str | list[str] | None = "auto",
+    use_rslora: bool = False,
 ):
     """Load model + tokenizer via unsloth FastLanguageModel with LoRA already applied.
 
     Returns (model, tokenizer) — model already has LoRA adapters attached.
     Unsloth handles quantization, LoRA patching, and kernel optimization internally.
+
+    ``use_rslora`` is ``lora.use_rslora``: Unsloth's ``get_peft_model`` takes it
+    directly and scales the adapter by ``alpha / sqrt(r)`` instead of
+    ``alpha / r``. It is forwarded on every call so the config's value, not
+    Unsloth's default, decides (#1853: the flag loaded and was never passed).
     """
+    if quantization == "8bit":
+        # #1811: the config refuses this pairing; name it here too rather than
+        # loading the model in 16-bit if the loader is ever reached another way.
+        raise ValueError(
+            "quantization 8bit is not supported by the Unsloth loader "
+            "(it passes load_in_4bit only); use 4bit or none"
+        )
+
     from unsloth import FastLanguageModel
 
     load_in_4bit = quantization == "4bit"
@@ -75,6 +89,7 @@ def load_model_and_tokenizer(
         target_modules=target_modules,
         bias="none",
         use_gradient_checkpointing="unsloth",  # 2x longer context for free
+        use_rslora=use_rslora,
     )
 
     return model, tokenizer

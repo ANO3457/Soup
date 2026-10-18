@@ -479,6 +479,12 @@ def _build_streamed_experts_class():
     class _ExpertMLP(torch.autograd.Function):
         @staticmethod
         def forward(ctx, hidden, owner, expert):  # noqa: D401 - autograd API
+            ctx.device_type = hidden.device.type
+            ctx.autocast_kwargs = {
+                "enabled": torch.is_autocast_enabled(ctx.device_type),
+                "dtype": torch.get_autocast_dtype(ctx.device_type),
+                "cache_enabled": torch.is_autocast_cache_enabled(),
+            }
             gate_up, down = owner.fetch(expert)
             out = expert_mlp(hidden, gate_up, down, owner.act_fn)
             ctx.owner = owner
@@ -492,7 +498,8 @@ def _build_streamed_experts_class():
             if not ctx.needs_input_grad[0]:
                 return None, None, None
             gate_up, down = ctx.owner.fetch(ctx.expert)
-            with torch.enable_grad():
+            # Backward usually runs outside the forward's autocast region.
+            with torch.enable_grad(), torch.autocast(ctx.device_type, **ctx.autocast_kwargs):
                 local = hidden.detach().requires_grad_(True)
                 out = expert_mlp(local, gate_up, down, ctx.owner.act_fn)
                 (grad_hidden,) = torch.autograd.grad(out, local, grad_out)

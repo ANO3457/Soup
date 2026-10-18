@@ -124,6 +124,34 @@ def test_streamed_experts_backward_equals_eager_bit_exactly(tmp_path, build):
     reader.close()
 
 
+@pytest.mark.parametrize("autocast", [False, True], ids=["fp32-control", "cpu-bf16-autocast"])
+def test_streamed_experts_backward_preserves_forward_autocast(tmp_path, autocast):
+    """Recomputation must differentiate the forward precision after its AMP region exits."""
+    import torch
+
+    module, n_experts, top_k = _deepseek_v3_experts(5)
+    streamed, reader = _streamed_copy(tmp_path, module, n_experts)
+    states, index, weights, grad_out = _routing(24, n_experts, top_k, 32, 9)
+    try:
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+            want = module(states, index, weights)
+        want.backward(grad_out)
+        want_states, want_weights = states.grad.clone(), weights.grad.clone()
+        states.grad = None
+        weights.grad = None
+
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+            got = streamed(states, index, weights)
+        got.backward(grad_out)
+
+        assert torch.equal(got, want)
+        assert float(want_states.abs().sum()) > 0.0
+        assert torch.equal(states.grad, want_states), (states.grad - want_states).abs().max().item()
+        assert torch.equal(weights.grad, want_weights)
+    finally:
+        reader.close()
+
+
 def test_each_routed_expert_is_read_once_forward_and_once_backward(tmp_path):
     """The cost the docstring states: an expert nobody routed to is never read."""
     import torch
