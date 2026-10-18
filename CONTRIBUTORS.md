@@ -237,6 +237,8 @@ Listed by first contribution. PR numbers link the work.
   - Accepted leading UTF-8 signatures in JSON, CSV and TXT datasets while preserving embedded U+FEFF content ([#1922](https://github.com/MakazhanAlpamys/Soup/issues/1922), [#1954](https://github.com/MakazhanAlpamys/Soup/pull/1954)).
 
   - Added bounded batched greedy generation to the custom-task and bundled-suite scorers, preserving prompt order and scalar-callable fallback. One completion per prompt now explicitly preserves saved beam configuration; progress/JSONL remains a separate follow-up, so this is only the batching slice of #1759 and does not close the parent issue ([#1759](https://github.com/MakazhanAlpamys/Soup/issues/1759), [#1958](https://github.com/MakazhanAlpamys/Soup/pull/1958))
+  - Added shared trace/ingest conversation rendering that normalizes LangChain human/ai/system roles and omits blank context turns while preserving the accepted plain-text versus multi-turn JSON contract. Seven isolated mutations are caught by behavioral regressions, including explicit-role and first-user selection controls ([#1809](https://github.com/MakazhanAlpamys/Soup/issues/1809), [#1848](https://github.com/MakazhanAlpamys/Soup/pull/1848))
+  - Verified the light-core dependency floors in an isolated Python 3.10 CI environment and repaired Plotext 5.2.2 figure detection without changing the Typer cap. The real hosted floor installation and CLI checks pass; four independent mutations catch version, training-stack, venv PATH and figure-detection regressions. The separate Typer migration remains with its own claim ([#1802](https://github.com/MakazhanAlpamys/Soup/issues/1802), [#1927](https://github.com/MakazhanAlpamys/Soup/pull/1927))
 
 - **AmixDigital** ([@Amix29](https://github.com/Amix29))
   - Added native Sesame CSM fine-tuning for transcript/audio pairs, training the backbone and depth decoder while keeping the Mimi codec frozen; documented supported inputs, refusals and the scoped Apple Silicon evidence ([#265](https://github.com/MakazhanAlpamys/Soup/issues/265), [#1769](https://github.com/MakazhanAlpamys/Soup/pull/1769)).
@@ -945,6 +947,9 @@ Listed by first contribution. PR numbers link the work.
 
 - **George Tonmoy Roy** ([@george07-t](https://github.com/george07-t))
   - First contribution. Capped repeated JSON/JSONL and data-review warnings while retaining exact skipped-row totals, so validation fractions and exit codes remain correct even when only a bounded sample is kept. The regression suite catches replacing the exact total with the sample length ([#1888](https://github.com/MakazhanAlpamys/Soup/issues/1888), [#1930](https://github.com/MakazhanAlpamys/Soup/pull/1930))
+
+- **Vincent Le** ([@VincentTLe](https://github.com/VincentTLe))
+  - First merged contribution. Made the checkpointing choice explicit in all 30 affected shipped TRL-family recipes, templates and examples, with 22 matching snapshots. The config walker catches deleting only the reward-example key even though that config still loads, preserving the memory behavior intended before the TRL forwarding fix ([#1862](https://github.com/MakazhanAlpamys/Soup/issues/1862), [#1923](https://github.com/MakazhanAlpamys/Soup/pull/1923))
 
 ---
 
