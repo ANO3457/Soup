@@ -283,6 +283,171 @@ def test_late_competitor_request_does_not_replace_the_confirmed_incumbent():
     assert row["pr"] == 91 and row["quiet"] == 13
 
 
+def test_reaffirmed_open_pr_outranks_a_declined_competing_take():
+    """#1432's owner claimed through a PR before the competing issue comment."""
+    comments = [
+        comment("bob", "I'd like to take this one. Here is my plan.",
+                "2026-10-03T10:33:31Z"),
+        comment(
+            board.MAINTAINER,
+            "Thank you, @bob. The plan is sound.\n\n"
+            "#7 already has an open pull request: #91 by @alice, opened on 2026-09-30. "
+            "An open pull request counts as a claim and the first claim stands, "
+            "so #7 stays with @alice.\n\n"
+            "So please do not open a separate pull request for #7.\n\n"
+            "If #91 is released, this thread will say so.",
+            "2026-10-04T15:51:20Z",
+        ),
+    ]
+    prs = [dict(pull(91, "alice", "Thread the freeze plan into layer selection."),
+                title="Respect the freeze plan (#7)", state="open",
+                created_at="2026-09-30T15:33:36Z")]
+    row = board.classify(issue(7, ("claimed",)), comments, prs, NOW)
+    assert row["state"] == "claimed by `@alice` since 2026-09-30"
+    assert row["pr"] == 91 and row["quiet"] is None
+    assert board.render([row], NOW).splitlines()[-1] == (
+        "| #7 | `Some title` | - | claimed by `@alice` since 2026-09-30 | #91 | - |"
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Thank you, @bob. The plan is sound.\n\n"
+        "Please do not open a separate pull request for #7.",
+        "Confirmed, @bob: this issue is not yours.",
+        "Confirmed, @bob: #7 is not yours.",
+    ],
+)
+def test_an_explicitly_declined_take_is_not_an_unconfirmed_owner(reply):
+    comments = [
+        comment("bob", "I'll take this.", "2026-10-03T10:00:00Z"),
+        comment(board.MAINTAINER, reply, "2026-10-04T10:00:00Z"),
+    ]
+    row = board.classify(issue(7, ("claimed",)), comments, [pull(92, "bob", "Refs #7")], NOW)
+    assert row["state"] == "claimed (see thread)"
+    assert row["pr"] is None and row["quiet"] is None
+
+
+def test_an_edited_old_decline_cannot_become_a_positive_confirmation():
+    comments = [
+        comment(board.MAINTAINER, "Confirmed, @bob: this issue is not yours.",
+                "2026-10-01T10:00:00Z", "2026-10-04T10:00:00Z"),
+        comment("bob", "I'll take this.", "2026-10-03T10:00:00Z"),
+    ]
+    row = board.classify(issue(7, ("claimed",)), comments, [pull(92, "bob", "Refs #7")], NOW)
+    assert row["state"] == "claimed by `@bob` since 2026-10-03 (unconfirmed)"
+    assert row["pr"] == 92 and row["quiet"] == 11
+
+
+def test_a_declined_reacceptance_cannot_create_an_uncertain_accepted_owner():
+    comments = [
+        comment("bob", "Taking item 2.", "2026-10-01T10:00:00Z"),
+        comment(board.MAINTAINER, "Confirmed, @bob: item 2 is yours.\n\n"
+                "Confirmed, @bob: this issue is not yours; item 2 remains unclaimed.",
+                "2026-10-02T10:00:00Z", "2026-10-08T10:00:00Z"),
+        comment(board.MAINTAINER, "The claim is released.", "2026-10-05T10:00:00Z"),
+        comment("bob", "Taking item 2 again.", "2026-10-07T10:00:00Z"),
+    ]
+    row = board.classify(issue(7, ("claimed",)), comments, [pull(92, "bob", "Refs #7")], NOW)
+    assert row["state"] == "free"
+    assert row["pr"] is None and row["quiet"] is None
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"user": {"login": "carol"}},
+        {"state": "closed"},
+        {"created_at": "2026-10-05T10:00:00Z"},
+        {"number": 92},
+    ],
+)
+def test_reaffirmed_pr_owner_needs_matching_open_prior_pr_metadata(metadata):
+    comments = [
+        comment("bob", "I'll take this.", "2026-10-03T10:00:00Z"),
+        comment(board.MAINTAINER, "Thank you, @bob.\n\n#7 stays with @alice. "
+                "#91 by @alice already carries it.\n\n"
+                "Please do not open a competing pull request for #7.",
+                "2026-10-04T10:00:00Z"),
+    ]
+    pr = dict(pull(91, "alice", "Fixes #7"), state="open",
+              created_at="2026-09-30T10:00:00Z")
+    pr.update(metadata)
+    row = board.classify(issue(7, ("claimed",)), comments, [pr], NOW)
+    assert row["state"] == "claimed (see thread)"
+    assert row["pr"] is None and row["quiet"] is None
+
+
+def test_a_declined_request_can_be_accepted_after_a_new_take():
+    comments = [
+        comment("bob", "I'll take this.", "2026-10-01T10:00:00Z"),
+        comment(board.MAINTAINER, "Confirmed, @bob: this issue is not yours.",
+                "2026-10-02T10:00:00Z"),
+        comment("bob", "I'll take this again.", "2026-10-03T10:00:00Z"),
+        comment(board.MAINTAINER, "Confirmed.", "2026-10-04T10:00:00Z"),
+    ]
+    row = board.classify(issue(7), comments, [pull(92, "bob", "Refs #7")], NOW)
+    assert row["state"] == "claimed by `@bob` since 2026-10-03"
+    assert row["pr"] == 92 and row["quiet"] == 11
+
+
+def test_declining_a_competitor_and_a_conditional_release_preserve_the_active_owner():
+    comments = [
+        comment("alice", "I'll take this.", "2026-10-01T10:00:00Z"),
+        comment(board.MAINTAINER, "Confirmed, @alice: it is yours.",
+                "2026-10-02T10:00:00Z"),
+        comment("bob", "I'll take this too.", "2026-10-03T10:00:00Z"),
+        comment(board.MAINTAINER, "Thank you, @bob. Please do not open a separate "
+                "pull request for #7. If the claim is released, this thread will say so.",
+                "2026-10-04T10:00:00Z"),
+    ]
+    row = board.classify(issue(7), comments, [pull(91, "alice", "Refs #7")], NOW)
+    assert row["state"] == "claimed by `@alice` since 2026-10-01"
+    assert row["pr"] == 91 and row["quiet"] == 13
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Thank you, @bob. The earlier instruction, "
+        "`do not open a separate pull request for #7`, no longer applies.",
+        "Thank you, @bob. The earlier instruction, "
+        "do not open a separate pull request for #7, no longer applies.",
+        "Thank you, @bob. The old note was "
+        "`#91 by @alice, so #7 stays with @alice`; it is no longer correct.",
+        "Thank you, @bob. It is not true that #7 stays with @alice. "
+        "#91 by @alice is the old pull request.",
+        "Thank you, @bob. The old note said #91 by @alice carries it, "
+        "so #7 stays with @alice; that is no longer correct.",
+        "Thank you, @bob. #91 by @alice carries it, so #7 stays with @alice. "
+        "That ruling is no longer correct.",
+    ],
+)
+def test_quoted_or_negated_claim_instructions_do_not_change_a_take_request(reply):
+    comments = [
+        comment("bob", "I'll take this.", "2026-10-03T10:00:00Z"),
+        comment(board.MAINTAINER, reply, "2026-10-04T10:00:00Z"),
+    ]
+    prs = [dict(pull(91, "alice", "Refs #7"), state="open",
+                created_at="2026-09-30T10:00:00Z"), pull(92, "bob", "Refs #7")]
+    row = board.classify(issue(7, ("claimed",)), comments, prs, NOW)
+    assert row["state"] == "claimed by `@bob` since 2026-10-03 (unconfirmed)"
+    assert row["pr"] == 92 and row["quiet"] == 11
+
+
+@pytest.mark.parametrize("verb", ["stays", "remains"])
+def test_direct_current_retention_names_the_verified_open_pr_owner(verb):
+    comments = [comment(board.MAINTAINER, f"#7 {verb} with @alice. "
+                        "#91 by @alice is the current open pull request.",
+                        "2026-10-04T10:00:00Z")]
+    prs = [dict(pull(91, "alice", "Fix the layer selection."), state="open",
+                created_at="2026-09-30T10:00:00Z")]
+    row = board.classify(issue(7, ("claimed",)), comments, prs, NOW)
+    assert row["state"] == "claimed by `@alice` since 2026-09-30"
+    assert row["pr"] == 91 and row["quiet"] is None
+
+
 def test_accepting_an_overlapping_second_owner_does_not_silently_pick_a_winner():
     comments = [
         comment("alice", "I'll take item 2.", "2026-10-01T10:00:00Z"),

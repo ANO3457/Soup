@@ -68,6 +68,7 @@ _ClaimTarget = tuple[str | None, tuple[str, str] | None]
 _ACCEPT_EVENT = 0
 _UNCERTAIN_ACCEPT_EVENT = 1
 _TERMINAL_EVENT = 2
+_DECLINE_EVENT = 3
 
 
 class BoardError(Exception):
@@ -175,7 +176,66 @@ def _terminal_targets(body: str) -> list[_ClaimTarget]:
     return targets
 
 
-def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | None, bool, bool]:
+def _declined_requests(body: str, number: int) -> list[_ClaimTarget]:
+    body = re.sub(r"`+[^`\n]*`+", "", body)
+    addressed = re.match(
+        r"^\s*(?:(?:thank you|thanks|confirmed)\s*[,!:]?\s*)?@([a-z0-9-]+)\b",
+        body, re.IGNORECASE,
+    )
+    if addressed is None:
+        return []
+    login = addressed.group(1).casefold()
+    for fact in re.split(r"(?<=[.!?;])\s+|\n", body[addressed.end():].lstrip(" ,:!")):
+        fact = fact.strip()
+        if fact.endswith("?") or _CONDITIONAL_RE.search(fact):
+            continue
+        if "@" in fact and not re.search(rf"@{re.escape(login)}\b", fact, re.IGNORECASE):
+            continue
+        if re.match(
+            rf"(?:\b(?:this issue|it)|#{number}\b)\s+is not yours\b|"
+            rf"(?:so\s+)?(?:please\s+)?do not open (?:a )?(?:separate|competing) "
+            rf"pull request for #{number}\b",
+            fact, re.IGNORECASE,
+        ):
+            return [(login, None)]
+    return []
+
+
+def _retained_pr(body: str, prs: list[dict], number: int, when: str) -> dict | None:
+    body = re.sub(r"`+[^`\n]*`+", "", body)
+    # A later clause can withdraw the apparent assertion; keep the whole paragraph.
+    context = re.sub(r"@[a-z0-9-]+", "", body, flags=re.IGNORECASE)
+    if re.search(
+        r"\b(?:not|no longer|old|earlier|previous|withdrawn|superseded|incorrect)\b",
+        context, re.IGNORECASE,
+    ):
+        return None
+    for fact in re.split(r"(?<=[.!?;])\s+|\n", body):
+        if fact.endswith("?") or _CONDITIONAL_RE.search(fact):
+            continue
+        retained = re.search(
+            rf"(?:^|,\s+so\s+)(?:#{number}\b|this issue)\s+(?:stays|remains) with "
+            r"@([a-z0-9-]+)\b", fact, re.IGNORECASE,
+        )
+        if retained is None:
+            continue
+        login = retained.group(1)
+        matches = [
+            pr for pr in prs
+            if _login(pr).casefold() == login.casefold() and pr.get("state") == "open"
+            and pr.get("created_at") and pr["created_at"] <= when
+            and re.search(
+                rf"#{pr['number']}\b\s+by\s+@{re.escape(login)}\b", body, re.IGNORECASE
+            )
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _claim_state(
+    comments: list[dict], number: int, prs: list[dict] | None = None
+) -> tuple[str | None, str | None, bool, bool, int | None]:
     """Reduce trusted owner facts, keeping scoped claims until explicitly completed/released."""
     events: list[tuple[str, int, int, int, str | dict | list[_ClaimTarget]]] = []
     for index, item in enumerate(sorted(comments, key=lambda entry: entry["created_at"])):
@@ -183,7 +243,11 @@ def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | N
             created, updated = item["created_at"], item.get("updated_at", item["created_at"])
             terminal_at = created
             seen = set()
-            for part, body in enumerate(_claim_paragraphs(item.get("body", ""))):
+            paragraphs = _claim_paragraphs(item.get("body", ""))
+            declined = _declined_requests("\n\n".join(paragraphs), number)
+            if declined:
+                events.append((created, index, -1, _DECLINE_EVENT, declined))
+            for part, body in enumerate(paragraphs):
                 named = _named_confirmation(body, number)
                 requests = [
                     reply for reply in comments
@@ -215,28 +279,37 @@ def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | N
         elif _login(item):
             events.append((item["created_at"], index, -1, _ACCEPT_EVENT, item))
     replies: list[dict] = []
-    active: dict[_ClaimTarget, tuple[str | None, str | None]] = {}
+    active: dict[_ClaimTarget, tuple[str | None, str | None, int | None]] = {}
     terminal = False
-    for _, _, part, action, value in sorted(events):
+    for when, _, part, action, value in sorted(events):
         if isinstance(value, dict):
             replies.append(value)
             continue
         if isinstance(value, str):
+            retained = _retained_pr(value, prs or [], number, when)
+            if retained is not None:
+                login = _login(retained)
+                active[(login.casefold(), None)] = (
+                    login, retained["created_at"][:10], retained["number"]
+                )
+                continue
+            if _declined_requests(value, number):
+                continue
             if action == _UNCERTAIN_ACCEPT_EVENT and terminal:
-                active[(None, _scope(value))] = (None, None)
+                active[(None, _scope(value))] = (None, None, None)
                 continue
             acceptance = _acceptance(value, replies, number)
             if acceptance is not None:
                 login, since, scope = acceptance
-                active[(login.casefold() if login else None, scope)] = (login, since)
+                active[(login.casefold() if login else None, scope)] = (login, since, None)
             continue
         for login, scope in value:
-            terminal = True
-
             def matches(author: str | None, subject: tuple[str, str] | None) -> bool:
                 return (login is None or author == login) and (scope is None or subject == scope)
 
-            active = {key: claim for key, claim in active.items() if not matches(*key)}
+            if action != _DECLINE_EVENT:
+                terminal = True
+                active = {key: claim for key, claim in active.items() if not matches(*key)}
             replies = [
                 item for item in replies
                 if not matches(_login(item).casefold(), _scope(item.get("body", "")))
@@ -244,18 +317,18 @@ def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | N
     owners = {login for login, _ in active}
     if active:
         if None in owners or len(owners) != 1:
-            return None, None, True, terminal
-        login, since = min(active.values(), key=lambda claim: claim[1] or "")
-        return login, since, True, terminal
+            return None, None, True, terminal, None
+        login, since, pr = min(active.values(), key=lambda claim: claim[1] or "")
+        return login, since, True, terminal, pr
     for item in replies:
         if _TAKE_RE.search(item.get("body", "")):
-            return _login(item), item["created_at"][:10], False, terminal
-    return None, None, False, terminal
+            return _login(item), item["created_at"][:10], False, terminal, None
+    return None, None, False, terminal, None
 
 
 def find_claimant(comments: list[dict], issue_number: int) -> tuple[str | None, str | None, bool]:
     """Return (login, since date, confirmed); several active owners need "see thread"."""
-    login, since, confirmed, _ = _claim_state(comments, issue_number)
+    login, since, confirmed, _, _ = _claim_state(comments, issue_number)
     return login, since, confirmed
 
 
@@ -303,7 +376,7 @@ def classify(
     issue: dict, comments: list[dict], prs: list[dict], now: datetime, is_open=_always_open
 ) -> dict:
     labels = label_names(issue)
-    login, since, confirmed, terminal = _claim_state(comments, issue["number"])
+    login, since, confirmed, terminal, claimed_pr = _claim_state(comments, issue["number"], prs)
     block = blocker(issue, comments, is_open)
     claimed = confirmed or ("claimed" in labels and not terminal)
     if block:
@@ -327,7 +400,8 @@ def classify(
         "difficulty": difficulty(issue),
         "kind": kind,
         "state": state,
-        "pr": find_pr(prs, issue["number"], login) if kind != "free" and metrics else None,
+        "pr": (claimed_pr or find_pr(prs, issue["number"], login))
+        if kind != "free" and metrics else None,
         "quiet": quiet_days(comments, login, now) if kind != "free" and metrics else None,
     }
 
