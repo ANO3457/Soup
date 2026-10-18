@@ -66,8 +66,8 @@ _AFTER_RE = re.compile(r"\bafter\s+#(\d+)", re.IGNORECASE)
 _DIFFICULTY_RE = re.compile(r"^difficulty:(\d+)$")
 _ClaimTarget = tuple[str | None, tuple[str, str] | None]
 _ACCEPT_EVENT = 0
-_TERMINAL_EVENT = 1
-_UNCERTAIN_ACCEPT_EVENT = 2
+_UNCERTAIN_ACCEPT_EVENT = 1
+_TERMINAL_EVENT = 2
 
 
 class BoardError(Exception):
@@ -180,9 +180,10 @@ def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | N
     events: list[tuple[str, int, int, int, str | dict | list[_ClaimTarget]]] = []
     for index, item in enumerate(sorted(comments, key=lambda entry: entry["created_at"])):
         if _login(item) == MAINTAINER:
+            created, updated = item["created_at"], item.get("updated_at", item["created_at"])
+            terminal_at = created
             seen = set()
             for part, body in enumerate(_claim_paragraphs(item.get("body", ""))):
-                created, updated = item["created_at"], item.get("updated_at", item["created_at"])
                 named = _named_confirmation(body, number)
                 requests = [
                     reply for reply in comments
@@ -200,15 +201,17 @@ def _claim_state(comments: list[dict], number: int) -> tuple[str | None, str | N
                 uncertain = key in seen and any(
                     reply["created_at"] > created for reply in requests
                 )
-                events.append((updated if appended or uncertain else created,
+                accepted_at = updated if appended or uncertain else created
+                events.append((accepted_at,
                                index, part,
                                _UNCERTAIN_ACCEPT_EVENT if uncertain else _ACCEPT_EVENT, body))
                 seen.add(key)
+                # An edit timestamp cannot date an old release. Keep its creation time,
+                # except when it follows an appended acceptance in this same comment.
+                terminal_at = max(terminal_at, accepted_at)
                 targets = _terminal_targets(body)
                 if targets:
-                    events.append(
-                        (updated if part else created, index, part, _TERMINAL_EVENT, targets)
-                    )
+                    events.append((terminal_at, index, part, _TERMINAL_EVENT, targets))
         elif _login(item):
             events.append((item["created_at"], index, -1, _ACCEPT_EVENT, item))
     replies: list[dict] = []

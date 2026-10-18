@@ -223,6 +223,23 @@ def test_appended_completion_overrides_acceptance_in_the_same_edited_comment():
     assert row["pr"] is None and row["quiet"] is None
 
 
+@pytest.mark.parametrize("separator", ["\n\n", " "])
+def test_appended_acceptance_does_not_outlive_its_later_completion_in_the_same_comment(separator):
+    comments = [
+        comment(
+            board.MAINTAINER,
+            "Thanks for the detailed plan.\n\nConfirmed, @bob: item 2 is yours."
+            + separator + "Item 2 is completed by merged #92.",
+            "2026-10-02T10:00:00Z",
+            "2026-10-10T10:00:00Z",
+        ),
+        comment("bob", "Taking item 2.", "2026-10-07T10:00:00Z"),
+    ]
+    row = board.classify(issue(7, ("claimed",)), comments, [pull(92, "bob", "Refs #7")], NOW)
+    assert row["kind"] == "free" and row["state"] == "free"
+    assert row["pr"] is None and row["quiet"] is None
+
+
 def test_issue_release_discards_old_requests_before_a_new_take_and_confirmation():
     comments = [
         comment("alice", "I'll take this", "2026-10-01T10:00:00Z"),
@@ -362,6 +379,37 @@ def test_unrelated_edit_of_old_acceptance_does_not_resurrect_a_released_claim(pr
     assert row["pr"] is None and row["quiet"] is None
 
 
+@pytest.mark.parametrize("prefix", ["", "Thanks for the detailed plan.\n\n"])
+@pytest.mark.parametrize(
+    "take, acceptance, release",
+    [
+        ("I'll take this.", "it is yours.", "The claim is released. This issue is free to take."),
+        ("Taking item 2.", "item 2 is yours.", "Item 2 is released."),
+    ],
+)
+def test_unrelated_edit_of_old_release_preserves_a_later_confirmed_owner(
+    prefix, take, acceptance, release
+):
+    comments = [
+        comment("alice", take, "2026-10-01T10:00:00Z"),
+        comment(board.MAINTAINER, f"Confirmed, @alice: {acceptance}",
+                "2026-10-02T10:00:00Z"),
+        comment(board.MAINTAINER, prefix + release + "\n\nTypo corrected.",
+                "2026-10-05T10:00:00Z", "2026-10-10T10:00:00Z"),
+        comment("bob", take, "2026-10-07T10:00:00Z"),
+        comment(board.MAINTAINER, f"Confirmed, @bob: {acceptance}",
+                "2026-10-08T10:00:00Z"),
+    ]
+    prs = [pull(91, "alice", "Refs #7"), pull(92, "bob", "Refs #7")]
+    row = board.classify(issue(7, ("claimed",)), comments, prs, NOW)
+    assert row["kind"] == "claimed"
+    assert row["state"] == "claimed by `@bob` since 2026-10-07"
+    assert row["pr"] == 92 and row["quiet"] == 7
+    assert board.render([row], NOW).splitlines()[-1] == (
+        "| #7 | `Some title` | - | claimed by `@bob` since 2026-10-07 | #92 | quiet 7 d |"
+    )
+
+
 @pytest.mark.parametrize("separator", ["\n\n", " "])
 def test_appended_same_scope_reacceptance_reports_uncertain_edit_chronology(separator):
     comments = [
@@ -378,6 +426,26 @@ def test_appended_same_scope_reacceptance_reports_uncertain_edit_chronology(sepa
     ]
     row = board.classify(issue(7), comments, [pull(91, "alice", "Refs #7")], NOW)
     assert row["state"] == "claimed (see thread)"
+    assert row["pr"] is None and row["quiet"] is None
+
+
+@pytest.mark.parametrize("separator", ["\n\n", " "])
+def test_explicit_completion_clears_an_uncertain_reacceptance_in_the_same_comment(separator):
+    comments = [
+        comment("alice", "Taking item 2.", "2026-10-01T10:00:00Z"),
+        comment(
+            board.MAINTAINER,
+            "Confirmed, @alice: item 2 is yours.\n\n"
+            "Confirmed, @alice: item 2 is yours again." + separator
+            + "Item 2 is completed by merged #92.",
+            "2026-10-02T10:00:00Z",
+            "2026-10-08T10:00:00Z",
+        ),
+        comment(board.MAINTAINER, "The claim is released.", "2026-10-05T10:00:00Z"),
+        comment("alice", "Taking item 2 again.", "2026-10-07T10:00:00Z"),
+    ]
+    row = board.classify(issue(7), comments, [pull(92, "alice", "Refs #7")], NOW)
+    assert row["kind"] == "free" and row["state"] == "free"
     assert row["pr"] is None and row["quiet"] is None
 
 
