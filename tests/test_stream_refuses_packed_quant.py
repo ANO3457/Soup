@@ -1249,3 +1249,58 @@ def test_the_unsupported_dtype_error_round_trips_through_pickle_and_copy():
         assert (clone.tensor, clone.dtype) == ("x", "U32")
     bare = UnsupportedDtypeError("message only")
     assert (bare.tensor, bare.dtype) == ("", None)
+
+
+# ==========================================================================
+# pins: the cache format, and a packed tensor inside an FP8 block source
+# ==========================================================================
+def test_the_shard_format_version_is_not_bumped():
+    """A bump invalidates EVERY existing layer cache (the 30 GB demo cache among them), so
+    it must be deliberate, never a side effect. This refusal does not need one: the source
+    is checked before a cache hit returns, so a stale cache of a bad source is refused."""
+    from soup_cli.utils.layer_shard import _SHARD_FORMAT_VERSION
+
+    assert _SHARD_FORMAT_VERSION == 5
+
+
+def _fp8_block_state():
+    """A tiny DeepSeek-V3 FP8 block source: e4m3 linears with float32 block scales."""
+    import torch
+
+    state = _dense_state()
+    for layer in range(LAYERS):
+        key = f"model.layers.{layer}.self_attn.o_proj.weight"
+        state[key] = state[key].to(torch.float32).to(torch.float8_e4m3fn)
+        state[key + "_scale_inv"] = torch.ones(1, 1)
+    return state
+
+
+@pytest.mark.parametrize(
+    ("key", "dtype", "needle"),
+    [
+        ("model.layers.1.mlp.experts.0.gate_proj.weight_packed", "int32",
+         "is stored as 'I32': compressed-tensors pack-quantized"),
+        ("model.layers.0.mlp.down_proj.weight", "uint8",
+         "is stored as 'U8': uint8, which bitsandbytes 4-bit packs"),
+    ],
+    ids=["i32-weight-packed", "u8-weight"],
+)
+def test_a_packed_tensor_beside_an_fp8_block_source_is_refused(tmp_path, key, dtype, needle):
+    """An accepted FP8 plan covers its FP8 weights and their scales only: every other tensor
+    still meets the tensor rule, in the same words for the sharder and the pre-flight."""
+    import torch
+
+    state = _fp8_block_state()
+    state[key] = torch.zeros((HIDDEN, INTER // 8), dtype=getattr(torch, dtype))
+    weights = _write(tmp_path / "w", state, quant=DEEPSEEK_FP8)
+    sharder, estimator = _refusals(tmp_path, weights)
+    assert f"checkpoint tensor {key!r} {needle}" in sharder
+    assert _TAIL in sharder and _POINTER in sharder
+    assert estimator == sharder
+
+
+def test_the_same_fp8_block_source_without_the_packed_tensor_shards(tmp_path):
+    """The control: the FP8 block source alone is planned and sharded, not refused."""
+    weights = _write(tmp_path / "w", _fp8_block_state(), quant=DEEPSEEK_FP8)
+    assert _shard(weights, tmp_path / "s").n_layers == LAYERS
+    assert _estimate(weights).total_bytes > 0
