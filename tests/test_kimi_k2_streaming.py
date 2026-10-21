@@ -477,6 +477,23 @@ _REFUSED = [
     ("quant-fp8-e5m2", {"quantization_config": dict(K2_BASE_CONFIG["quantization_config"],
                                                     fmt="e5m2")},
      "quantization_config", "e5m2"),
+    # Added in the review round (benchmarks/gate-kimi-k2-admission.md, section 7): the guard is an
+    # allowlist of the published top-level keys, and num_key_value_heads is required.
+    ("num_key_value_heads-absent", lambda: _without("num_key_value_heads"),
+     "num_key_value_heads", "absent"),
+    ("num_key_value_heads-divides", {"num_key_value_heads": 32}, "num_key_value_heads", "32"),
+    ("rope_parameters", {"rope_parameters": {"rope_type": "yarn", "factor": 32.0,
+                                             "attention_factor": 1.5, "truncate": False}},
+     "rope_parameters", "'attention_factor': 1.5"),
+    ("partial_rotary_factor", {"partial_rotary_factor": 0.5}, "partial_rotary_factor", "0.5"),
+    ("head_dim", {"head_dim": 128}, "head_dim", "128"),
+    ("rope-partial_rotary_factor", _rope(partial_rotary_factor=0.5),
+     "rope_scaling['partial_rotary_factor']", "0.5"),
+    ("rope-empty", {"rope_scaling": {}}, "rope_scaling", "{}"),
+    ("ep_size-1", {"ep_size": 1}, "ep_size", "1"),
+    ("rope_interleave-true", {"rope_interleave": True}, "rope_interleave", "True"),
+    ("pad_token_id", {"pad_token_id": 163839}, "pad_token_id", "163839"),
+    ("sliding_window", {"sliding_window": 4096}, "sliding_window", "4096"),
 ]
 
 
@@ -524,8 +541,10 @@ def test_thinking_is_refused_and_quantization_config_is_the_first_failing_field(
     )
 
     raw = _base(**K2_THINKING_CHANGES)
+    # The registered rows first; the review round's allowlist then names the two fields of
+    # Thinking's file that the published Base / Instruct file does not have.
     assert [failure.field for failure in kimi_k2_guard_failures(raw)] == [
-        "quantization_config.quant_method"
+        "quantization_config.quant_method", "ep_size", "pad_token_id"
     ]
     with pytest.raises(UnsupportedKimiK2Error) as caught:
         load_stream_model_config(_write_config(tmp_path / "thinking", raw))
@@ -535,10 +554,6 @@ def test_thinking_is_refused_and_quantization_config_is_the_first_failing_field(
 _ADMITTED = [
     ("published", {}),
     ("moe_layer_freq-absent", lambda: _without("moe_layer_freq")),
-    ("ep_size-1", {"ep_size": 1}),
-    ("ep_size-0", {"ep_size": 0}),
-    ("num_key_value_heads-absent", lambda: _without("num_key_value_heads")),
-    ("rope_interleave-true", {"rope_interleave": True}),
     ("rope_scaling-absent", lambda: _without("rope_scaling")),
     ("rope_scaling-null", {"rope_scaling": None}),
     ("rope-rope_type-yarn", _rope(rope_type="yarn")),
@@ -555,9 +570,38 @@ _ADMITTED = [
         "activation_scheme": "dynamic", "quant_method": "fp8", "weight_block_size": [128, 128]})),
     ("top-1-without-norm", {"num_experts_per_tok": 1, "norm_topk_prob": False}),
     ("n_shared_experts-0", {"n_shared_experts": 0}),
-    ("thinking-unquantised", lambda: _without(
-        "quantization_config", raw=_base(**K2_THINKING_CHANGES))),
+    ("metadata", {"_commit_hash": "ce72df012259dcc55d945e890f815fe7ef69159c",
+                  "_name_or_path": "moonshotai/Kimi-K2-Base", "dtype": "bfloat16"}),
 ]
+
+
+def test_thinking_without_its_quantization_is_still_refused_by_the_allowlist():
+    """Thinking's file carries fields the published Base / Instruct file does not."""
+    from soup_cli.utils.kimi_k2 import kimi_k2_guard_failures
+
+    raw = _without("quantization_config", raw=_base(**K2_THINKING_CHANGES))
+    failures = kimi_k2_guard_failures(raw)
+    assert [failure.field for failure in failures] == ["ep_size", "pad_token_id"]
+    assert all("unexpected field" in failure.reason for failure in failures)
+    assert all("training.stream_layers" in failure.reason for failure in failures)
+
+
+def test_the_allowlist_is_exactly_the_published_keys_plus_named_metadata():
+    from soup_cli.utils.kimi_k2 import _METADATA_KEYS, _PUBLISHED_KEYS
+
+    assert _PUBLISHED_KEYS == set(K2_BASE_CONFIG)
+    assert _METADATA_KEYS == {"_commit_hash", "_name_or_path", "dtype"}
+
+
+def test_the_loader_admits_the_commit_hash_transformers_adds_to_every_dict(tmp_path):
+    pytest.importorskip("transformers")
+    from transformers import PretrainedConfig
+
+    from soup_cli.utils.kimi_k2 import load_stream_model_config
+
+    folder = _write_config(tmp_path / "k2", K2_BASE_CONFIG)
+    assert "_commit_hash" in PretrainedConfig.get_config_dict(folder)[0]
+    assert load_stream_model_config(folder).model_type == "deepseek_v3"
 
 
 @pytest.mark.parametrize("changes", [case[1] for case in _ADMITTED], ids=[c[0] for c in _ADMITTED])
@@ -589,12 +633,14 @@ def test_every_failure_is_listed_in_guard_order():
 def test_a_refusal_never_quotes_raw_control_bytes_and_stays_short():
     from soup_cli.utils.kimi_k2 import UnsupportedKimiK2Error, kimi_k2_native_config_dict
 
-    hostile = "\x1b[31mred\x1b[0m‮" + "x" * 5000
+    hostile_key = "\x1b[2Jkey\u202e"
+    hostile = "\x1b[31mred\x1b[0m\u202e" + "x" * 5000
     raw = _base(topk_method=hostile, **_rope(**{"\x1b]0;title\x07": 1}))
+    raw[hostile_key] = hostile
     with pytest.raises(UnsupportedKimiK2Error) as caught:
         kimi_k2_native_config_dict(raw)
     message = str(caught.value)
-    assert "\x1b" not in message and "‮" not in message and "\x07" not in message
+    assert "\x1b" not in message and "\u202e" not in message and "\x07" not in message
     assert len(message) < 2500
 
 
@@ -1332,11 +1378,16 @@ def test_the_setup_refuses_a_guard_failure_before_resolving_any_weight(tmp_path,
     def _resolve(*_args, **_kwargs):
         raise AssertionError("weights were resolved")
 
+    calls = {}
     monkeypatch.setattr(kimi_k2, "load_stream_model_config", _loader)
     with pytest.raises(kimi_k2.UnsupportedKimiK2Error, match="n_group=8"):
         _drive_qwen4_streaming_setup(
-            tmp_path, monkeypatch, _resolve, arch="deepseek_v3", model_cfg=_deepseek_setup_cfg()
+            tmp_path, monkeypatch, _resolve, arch="deepseek_v3", model_cfg=_deepseek_setup_cfg(),
+            load_calls=calls,
         )
+    # Before the tokenizer too (review round): a refused K2 is not first sent to install the
+    # tokenizer's requirements.
+    assert "tokenizer" not in calls
 
 
 def test_the_meta_skeleton_loads_its_config_through_the_k2_loader(monkeypatch):
@@ -1355,7 +1406,9 @@ def test_the_meta_skeleton_loads_its_config_through_the_k2_loader(monkeypatch):
     assert seen == [("some/base", {"trust_remote_code": False})]
 
 
-def test_a_failed_tokenizer_load_prints_the_k2_hint_and_reraises(monkeypatch):
+def _drive_failed_tokenizer(monkeypatch, failure, hint):
+    """The real setup up to its tokenizer load, which raises ``failure``; returns
+    (the raised exception, what was printed)."""
     import sys
     from io import StringIO
 
@@ -1364,15 +1417,8 @@ def test_a_failed_tokenizer_load_prints_the_k2_hint_and_reraises(monkeypatch):
     import soup_cli.trainer.stream_setup as stream_setup
     import soup_cli.utils.kimi_k2 as kimi_k2
 
-    failure = ValueError("the tokenizer needs custom code")
-    seen = []
-
     def _tokenizer(*_args, **_kwargs):
         raise failure
-
-    def _hint(base, **kwargs):
-        seen.append((base, kwargs))
-        return "Kimi K2 tokenizer: pip install tiktoken"
 
     monkeypatch.setitem(
         sys.modules, "transformers",
@@ -1384,7 +1430,11 @@ def test_a_failed_tokenizer_load_prints_the_k2_hint_and_reraises(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "peft", SimpleNamespace(TaskType=SimpleNamespace(CAUSAL_LM="CAUSAL_LM"))
     )
-    monkeypatch.setattr(kimi_k2, "kimi_k2_tokenizer_hint", _hint)
+    monkeypatch.setattr(kimi_k2, "kimi_k2_tokenizer_hint", hint)
+    # The config loads first (review round), so this drive starts past it.
+    monkeypatch.setattr(
+        kimi_k2, "load_stream_model_config", lambda *_a, **_k: _deepseek_setup_cfg()
+    )
     buffer = StringIO()
     monkeypatch.setattr(stream_setup, "console", Console(file=buffer, width=200))
 
@@ -1393,11 +1443,40 @@ def test_a_failed_tokenizer_load_prints_the_k2_hint_and_reraises(monkeypatch):
         _trust_remote_code = False
 
     cfg = SimpleNamespace(base="moonshotai/Kimi-K2-Base", task="sft")
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(BaseException) as caught:
         _Wrapper()._setup_streaming_transformers(cfg, SimpleNamespace())
-    assert caught.value is failure
+    return caught.value, buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ImportError("This modeling file requires the following packages: tiktoken"),
+     ValueError("the tokenizer needs custom code")],
+    ids=["tiktoken-missing", "custom-code"],
+)
+def test_a_failed_tokenizer_load_prints_the_k2_hint_and_reraises(monkeypatch, failure):
+    """A missing tiktoken surfaces as an ImportError from transformers' remote-code loader."""
+    seen = []
+
+    def _hint(base, **kwargs):
+        seen.append((base, kwargs))
+        return "Kimi K2 tokenizer: pip install tiktoken"
+
+    raised, printed = _drive_failed_tokenizer(monkeypatch, failure, _hint)
+    assert raised is failure
     assert seen == [("moonshotai/Kimi-K2-Base", {})]
-    assert "pip install tiktoken" in buffer.getvalue()
+    assert "pip install tiktoken" in printed
+
+
+def test_a_hint_that_fails_never_masks_the_tokenizers_own_error(monkeypatch):
+    failure = ImportError("tiktoken")
+
+    def _broken_hint(*_args, **_kwargs):
+        raise RuntimeError("the hint itself broke")
+
+    raised, printed = _drive_failed_tokenizer(monkeypatch, failure, _broken_hint)
+    assert raised is failure
+    assert "the hint itself broke" not in printed
 
 
 # ==========================================================================

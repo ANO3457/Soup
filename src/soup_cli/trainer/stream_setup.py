@@ -898,6 +898,7 @@ class StreamingSetupMixin:
 
         from soup_cli.utils.expert_stream import EXPERT_LAYOUT_PER_EXPERT
         from soup_cli.utils.fp8_block import fp8_block_size
+        from soup_cli.utils.kimi_k2 import load_stream_model_config
         from soup_cli.utils.layer_shard import (
             PER_EXPERT_LAYOUT_ARCHS,
             QUANT_NF4,
@@ -945,6 +946,17 @@ class StreamingSetupMixin:
         from soup_cli.utils.stripe_roots import resolve_stripe_roots
         from soup_cli.utils.terminal import for_terminal
 
+        # The streamed decoder is always transformers' own class (see
+        # _STREAM_NATIVE_MODEL_CODE); trust_remote_code reaches the tokenizer only. A Kimi K2
+        # config (model_type kimi_k2: custom code to AutoConfig) loads into the native
+        # DeepseekV3Config behind a guard that refuses by name what that class would compute
+        # differently (utils/kimi_k2.py). Before the tokenizer: a refused K2 is told so first,
+        # not sent to install the tokenizer's requirements.
+        model_config = load_stream_model_config(
+            cfg.base, trust_remote_code=self._STREAM_NATIVE_MODEL_CODE,
+            **base_revision_kwargs(cfg.base),
+        )
+
         console.print(f"[dim]Loading tokenizer: {cfg.base}[/]")
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -960,17 +972,6 @@ class StreamingSetupMixin:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        from soup_cli.utils.kimi_k2 import load_stream_model_config
-
-        # The streamed decoder is always transformers' own class (see
-        # _STREAM_NATIVE_MODEL_CODE); trust_remote_code reaches the tokenizer only. A Kimi K2
-        # config (model_type kimi_k2: custom code to AutoConfig) loads into the native
-        # DeepseekV3Config behind a guard that refuses by name what that class would compute
-        # differently (utils/kimi_k2.py).
-        model_config = load_stream_model_config(
-            cfg.base, trust_remote_code=self._STREAM_NATIVE_MODEL_CODE,
-            **base_revision_kwargs(cfg.base),
-        )
         # Allowlist, not a heuristic — a half-supported architecture streams
         # weights into the wrong module and mis-trains silently.
         arch = stream_arch_of(model_config)

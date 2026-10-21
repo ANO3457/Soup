@@ -6,10 +6,12 @@
   into transformers' own `DeepseekV3Config` (`model_type` set to `deepseek_v3`, `auto_map` dropped),
   after a guard that admits a K2 config only where that class computes what K2's own code computes:
   `noaux_tc` sigmoid routing with one expert group, top-k of at least 2 under renormalisation, every
-  layer past `first_k_dense_replace` an MoE layer, no expert parallelism, only the yarn rope keys
-  K2 reads, and unquantised or DeepSeek-V3 block FP8 weights. A config that fails any of them is
-  refused before any weight is resolved, naming every such field and its value; Kimi-K2-Thinking
-  (compressed-tensors INT4) is refused as `quantization_config.quant_method='compressed-tensors'`.
+  layer past `first_k_dense_replace` an MoE layer, `num_key_value_heads` equal to the head count,
+  only the yarn rope keys K2 reads, unquantised or DeepSeek-V3 block FP8 weights, and no top-level
+  field outside the published K2-Base / K2-Instruct `config.json` (besides three metadata keys). A
+  config that fails any of them is refused before the tokenizer or any weight is loaded, naming
+  every such field and its value; Kimi-K2-Thinking (compressed-tensors INT4) is refused as
+  `quantization_config.quant_method='compressed-tensors'`.
   In the gate (`benchmarks/gate-kimi-k2-admission.md`) the field-by-field config check fails as
   registered on one field: transformers adds `rope_theta` and `rope_type` to `rope_scaling`, as it
   does for any DeepSeek-V3 config. The other checks pass. A tiny K2-like checkpoint (the published

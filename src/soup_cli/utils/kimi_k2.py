@@ -43,6 +43,43 @@ NATIVE_MODEL_TYPE = "deepseek_v3"
 #: Keys the rewrite drops: ``auto_map`` points at the repository's own code.
 _DROPPED_KEYS = ("auto_map",)
 _ARCHITECTURES = ["DeepseekV3ForCausalLM"]
+#: Every top-level key of the published Kimi-K2-Base and Kimi-K2-Instruct ``config.json``
+#: (byte-identical files; revisions in ``benchmarks/gate-kimi-k2-admission.md``). The guard is an
+#: allowlist: a key outside this set and :data:`_METADATA_KEYS` is refused by name, because the
+#: native class may read a key K2's own code ignores (``head_dim``, ``partial_rotary_factor``, a
+#: transformers-5 ``rope_parameters`` ...) and then compute differently or crash.
+_PUBLISHED_KEYS = frozenset(
+    {
+        "architectures", "attention_bias", "attention_dropout", "auto_map", "aux_loss_alpha",
+        "bos_token_id", "eos_token_id", "first_k_dense_replace", "hidden_act", "hidden_size",
+        "initializer_range", "intermediate_size", "kv_lora_rank", "max_position_embeddings",
+        "model_type", "moe_intermediate_size", "moe_layer_freq", "n_group", "n_routed_experts",
+        "n_shared_experts", "norm_topk_prob", "num_attention_heads", "num_experts_per_tok",
+        "num_hidden_layers", "num_key_value_heads", "num_nextn_predict_layers", "pretraining_tp",
+        "q_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "quantization_config",
+        "rms_norm_eps", "rope_theta", "routed_scaling_factor", "rope_scaling", "scoring_func",
+        "seq_aux", "tie_word_embeddings", "topk_group", "topk_method", "torch_dtype",
+        "transformers_version", "use_cache", "v_head_dim", "vocab_size",
+    }
+)
+#: Keys outside the published file, admitted because neither class computes with them.
+_METADATA_KEYS = frozenset(
+    {
+        # Added by transformers' own reader (``get_config_dict``) to every dict it returns;
+        # ``PreTrainedConfig`` pops it as the Hub revision of the file, not a model setting.
+        "_commit_hash",
+        # Written by ``save_pretrained`` as the source path: a provenance stamp only.
+        "_name_or_path",
+        # transformers 5's spelling of the published ``torch_dtype``: the checkpoint's storage
+        # dtype, which the streamed model does not use (it is built at the stream dtype).
+        "dtype",
+    }
+)
+_ALLOWED_KEYS = _PUBLISHED_KEYS | _METADATA_KEYS
+_UNEXPECTED_REASON = (
+    "unexpected field {name}: training.stream_layers admits kimi_k2 only with the published K2 "
+    "config fields"
+)
 #: The ``rope_scaling`` keys K2's yarn reads. The native yarn reads more (``attention_factor``,
 #: ``truncate``, ``partial_rotary_factor``), each of which K2 ignores.
 _ROPE_KEYS = frozenset(
@@ -96,11 +133,19 @@ def _is_number(value: Any) -> bool:
 def _rope_failures(rope: Any) -> list:
     """The ``rope_scaling`` rows: a yarn dict K2's yarn and the native yarn compute alike."""
     if rope is _ABSENT or rope is None:
-        return []
+        return []  # both use their plain rotary embedding (G1c "no-scaling")
     if not isinstance(rope, Mapping):
         return [
             GuardFailure(
                 "rope_scaling", _brief(rope), "K2 reads rope_scaling as a dict (or none at all)"
+            )
+        ]
+    if not rope:
+        return [
+            GuardFailure(
+                "rope_scaling", _brief(dict(rope)),
+                "K2 indexes rope_scaling['type'] whenever rope_scaling is not null, so an empty "
+                "dict fails there, while the native class treats it as no scaling",
             )
         ]
     failures = []
@@ -200,7 +245,10 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
     """Every field of a ``kimi_k2`` config the native class would not compute like K2, in
     guard order; ``()`` when the config is admitted.
 
-    The order is the table in ``benchmarks/gate-kimi-k2-admission.md`` (G1b).
+    The order is the table in ``benchmarks/gate-kimi-k2-admission.md`` (G1b), then the
+    allowlist of top-level keys added in the review round. Its ``ep_size`` and
+    ``rope_interleave`` rows are now the allowlist's: neither key is in the published file, so
+    either is refused whenever present.
     """
 
     def value(key: str) -> Any:
@@ -245,12 +293,6 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
         "first_k_dense_replace one",
     )
     check(
-        "ep_size", value("ep_size") is _ABSENT or (
-            _is_int(value("ep_size")) and value("ep_size") <= 1
-        ),
-        "K2 splits its experts across ep_size processes; layer streaming is one process",
-    )
-    check(
         "n_routed_experts",
         _is_int(value("n_routed_experts")) and value("n_routed_experts") >= 1,
         "without routed experts K2 builds dense layers; the native class cannot",
@@ -261,17 +303,24 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
         "without it K2 drops the shared expert; the native class always builds one",
     )
     check(
-        "num_key_value_heads", value("num_key_value_heads") is _ABSENT or (
-            value("num_key_value_heads") == value("num_attention_heads")
-        ),
-        "K2's MLA ignores it; the native class divides num_attention_heads by it",
-    )
-    check(
-        "rope_interleave", value("rope_interleave") in (_ABSENT, True),
-        "K2 always applies the interleaved rotary layout; the native class reads this flag",
+        "num_key_value_heads",
+        _is_int(value("num_key_value_heads"))
+        and value("num_key_value_heads") == value("num_attention_heads"),
+        "K2's MLA ignores it, while the native class divides num_attention_heads by it (and "
+        "defaults it to 128 when absent): only equal to num_attention_heads, as published, do "
+        "the two compute alike",
     )
     failures.extend(_rope_failures(value("rope_scaling")))
     failures.extend(_quantization_failures(value("quantization_config")))
+    # Last, so the registered rows above keep their order (added in the review round).
+    for key in raw:
+        if key not in _ALLOWED_KEYS:
+            name = key if isinstance(key, str) and key.isascii() and key.isidentifier() else (
+                _brief(key)
+            )
+            failures.append(
+                GuardFailure(name, _brief(raw[key]), _UNEXPECTED_REASON.format(name=repr(name)))
+            )
     return tuple(failures)
 
 
