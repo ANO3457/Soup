@@ -889,7 +889,7 @@ class StreamingSetupMixin:
         from dataclasses import replace
 
         from peft import TaskType
-        from transformers import AutoConfig, AutoTokenizer
+        from transformers import AutoTokenizer
 
         # BEFORE the tokenizer load, the weight resolve and the shard write:
         # this configuration cannot work, and finding out minutes into disk I/O
@@ -946,16 +946,28 @@ class StreamingSetupMixin:
         from soup_cli.utils.terminal import for_terminal
 
         console.print(f"[dim]Loading tokenizer: {cfg.base}[/]")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.base, trust_remote_code=self._trust_remote_code,
-            **base_revision_kwargs(cfg.base),
-        )
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                cfg.base, trust_remote_code=self._trust_remote_code,
+                **base_revision_kwargs(cfg.base),
+            )
+        except Exception:
+            # Kimi K2's tokenizer is repository code that imports tiktoken: say so by name.
+            from soup_cli.utils.kimi_k2 import print_kimi_k2_tokenizer_hint
+
+            print_kimi_k2_tokenizer_hint(cfg.base, console, **base_revision_kwargs(cfg.base))
+            raise
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        from soup_cli.utils.kimi_k2 import load_stream_model_config
+
         # The streamed decoder is always transformers' own class (see
-        # _STREAM_NATIVE_MODEL_CODE); trust_remote_code reaches the tokenizer only.
-        model_config = AutoConfig.from_pretrained(
+        # _STREAM_NATIVE_MODEL_CODE); trust_remote_code reaches the tokenizer only. A Kimi K2
+        # config (model_type kimi_k2: custom code to AutoConfig) loads into the native
+        # DeepseekV3Config behind a guard that refuses by name what that class would compute
+        # differently (utils/kimi_k2.py).
+        model_config = load_stream_model_config(
             cfg.base, trust_remote_code=self._STREAM_NATIVE_MODEL_CODE,
             **base_revision_kwargs(cfg.base),
         )
