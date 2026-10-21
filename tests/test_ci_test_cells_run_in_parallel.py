@@ -29,9 +29,10 @@ PYPROJECT = ROOT / "pyproject.toml"
 CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 
 RUN_STEP = "Run unit tests with coverage"
-# 2026-10-19: every cell but ubuntu / 3.10 runs this one, with `--no-cov`. Coverage is
-# measured in one cell (tests/test_ci_full_matrix_on_approval.py::TestCoverageIsMeasuredInOneCell);
-# the parallelism pins below hold for both steps, because most cells now run the second.
+# 2026-10-19: every cell but ubuntu / 3.11 (3.10 until #1805) runs this one, with
+# `--no-cov`. Coverage is measured in one cell
+# (tests/test_ci_full_matrix_on_approval.py::TestCoverageIsMeasuredInOneCell); the
+# parallelism pins below hold for both steps, because most cells now run the second.
 NO_COV_STEP = "Run unit tests without coverage"
 RUN_STEPS = (RUN_STEP, NO_COV_STEP)
 INSTALL_STEP = "Install dependencies"
