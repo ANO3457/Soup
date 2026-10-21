@@ -1,7 +1,10 @@
 # Gate: layer streaming admits Kimi K2 through transformers' own DeepseekV3Config
 
-Status: **rule committed, not run.** Sections 1-3 are the rule, written and committed before
-any gate run. Sections 4-6 are filled from the run. CPU only; no GPU, no K2 weight download.
+Status: **G1a FAIL as written on 1 of 43 fields (explained in section 5: transformers adds two
+keys to `rope_scaling`, no K2 value is lost), G1b PASS, G1c PASS, G2 PASS, G3 PASS** (CPU only;
+run 2026-10-21). Sections 1-3 are the rule as committed in `a236a4e49` before any gate run,
+unchanged since; sections 4-6 are filled from the run. No GPU, no K2 weight download, no K2 or 1T
+training run.
 
 ## 1. Question
 
@@ -221,12 +224,163 @@ is altered in the source, a named test must fail, and the file is restored byte 
 
 ## 4. Box state
 
-(filled after the run)
+- The RTX 5070 Laptop box with its GPU unused: every process ran with `CUDA_VISIBLE_DEVICES=-1`
+  (`torch.cuda.is_available()` False in the gate report). 32 logical CPUs, 31.7 GiB RAM
+  (34,070,192,128 B); 11,084,537,856 B (10.3 GiB) available when the gate script started, and at
+  least 6 GiB free before every pytest process. Other Claude sessions shared the machine.
+- Software: Python 3.12.10, Windows 11 26200, torch 2.14.0+cu130, transformers 5.17.0,
+  bitsandbytes 0.50.2 (CPU), safetensors 0.8.0. `tiktoken` 0.14.0 happens to be installed; no
+  tokenizer was loaded.
+- Code: the rule is `a236a4e49`. Every gate ran on `c5b723dfc` (code, tests and docs), with a
+  clean working tree: G2, and the in-test halves of G1 and G3, as `tests/test_kimi_k2_streaming.py`
+  (115 tests, all passed, 24.6 s); G1 and G3 on the real files as
+  `benchmarks/harness/kimi_k2_gate.py --k2-dir <the scratchpad copies>` (peak RSS 1.0 GB).
+- Nothing was downloaded. The real files were text-only copies fetched earlier into the session
+  scratchpad (section 2's table; sha256 re-checked by the gate script). No K2 Python file was
+  imported or executed: the loader's dynamic-module hook was replaced by a function that fails,
+  and it was called 0 times.
 
 ## 5. Results
 
-(filled after the run)
+### G1, config: G1a FAIL as written on 1 of 43 fields (explained, no K2 value lost); G1b PASS; G1c PASS
+
+**G1a.** On the real Base and Instruct files (byte-identical, sha256 `8c13ae10...7439`; the test
+file's `K2_BASE_CONFIG` equals the real Base dict), Soup's loader returns a `DeepseekV3Config` with
+`model_type` `deepseek_v3` and no `auto_map`. Of the 43 raw keys compared, 42 hold the same value
+under the rule (with the two named normalisations, `rope_theta` and `torch_dtype`). The 43rd,
+`rope_scaling`, does not compare equal: transformers' rope standardisation adds two keys to the
+dict it is handed, `rope_theta: 50000.0` and `rope_type: "yarn"`. Each of K2's seven
+`rope_scaling` keys keeps its value, `rope_parameters` holds all of them plus those two, and
+`AutoConfig` adds the same two keys to the same file spelled `deepseek_v3` (checked directly). The
+rule named only two normalisations, so G1a is a FAIL as written; the difference is transformers'
+own, made for every DeepSeek-V3 config, and no K2 value is lost or changed. The exploratory probe
+before the rule missed it because it handed transformers a shallow copy, so the raw dict it then
+compared against had received the same two keys. `tests/test_kimi_k2_streaming.py` pins the
+observed behaviour exactly (the seven values equal, the two additions named).
+
+Controls, all held, on both files:
+- today's failure: `AutoConfig.from_pretrained(trust_remote_code=False)` raises `ValueError: The
+  repository ... contains custom code which must be executed ...`;
+- AutoConfig equivalence: the loader's `to_dict()` equals `AutoConfig`'s for the same dict spelled
+  `deepseek_v3` without `auto_map`, except `_name_or_path`, and each `name_or_path` is its folder;
+- no dynamic-module load (0 calls); `config.json` bytes unchanged; the in-memory raw dict is not
+  mutated (deep copy, pinned by a test and by the `rewrite-deepcopy` mutation).
+
+Reported: no Python warning and no `transformers` log record at WARNING or above during either
+load.
+
+**G1b.** Unmodified Base and Instruct pass. 39 refusal cases on the real Base dict (every row of the
+table, each `rope_scaling` condition, absent spellings, non-int and non-mapping spellings) are each
+refused with `UnsupportedKimiK2Error`, naming exactly that one field and its value; 21 admitted
+variants pass (absent optional fields, the accepted FP8 spellings with `scale_fmt: "float"` and
+without `fmt`, an `mscale` pair, top-1 without renormalisation, and Thinking's own non-quantisation
+values). A refusal never carries a raw ESC, BEL or U+202E and is bounded in length.
+
+Thinking (sha256 `666ee58f...1c15`) is refused. Its only guard failure, so the first, is
+`quantization_config.quant_method='compressed-tensors'`, as expected by reading. It differs from
+Base in 57 keys, most of them serialised generation defaults; the guard-relevant ones are
+`quantization_config`, `rms_norm_eps` (1e-05), `rope_scaling.factor` (64.0),
+`max_position_embeddings` (262144), `ep_size` (1) and the token ids, and all but
+`quantization_config` are admitted values. With its `quantization_config` removed it passes the
+guard (`thinking-unquantised`); that copy was not streamed.
+
+**G1c.** The hand transcriptions of K2's `MoEGate.forward` and its yarn rotary embedding and
+softmax scale agree with the native modules where the guard admits, and differ where it refuses:
+- router at K2's values (384 experts, top-8, `n_group` 1, `topk_group` 1): indices and weights
+  `torch.equal`. `n_group` 2 with an all-negative biased score: different experts (K2's 0.0 fill
+  beats them). Top-1 with `norm_topk_prob`: same expert, different weight (K2 does not
+  renormalise);
+- rope over 4096 positions: cos, sin and the attention scale equal on 7 admitted variants (the
+  published yarn, no scaling, `mscale` 1 alone, no `mscale` pair, an `mscale` pair of 0.707,
+  default betas, factor 8); different on 4 refused ones (no `original_max_position_embeddings`,
+  `mscale_all_dim` without `mscale`, `mscale` 0.707 alone, an `attention_factor`), and on a zero
+  `beta_fast` the transcription raises `ZeroDivisionError` where the native class silently uses 32.
+
+### G2, parity: PASS
+
+- **Model, 4 of 4 cells** (`test_the_streamed_k2_matches_the_resident_native_model_bit_exactly`):
+  fused / per_expert x bf16 source / FP8 block source (16 x 32). Logits, loss and every LoRA
+  gradient of the streamed model, built from the `kimi_k2` folder through Soup's loader, are
+  `torch.equal` to the resident control's; both have the same set of LoRA gradients (the targets
+  Soup resolves: `q_a_proj`, `q_b_proj`, `kv_a_proj_with_mqa`, `kv_b_proj`, `o_proj`), and each cell
+  has a non-zero layer-0 LoRA gradient. No dynamic-module load in any cell.
+- **Stale key**: the sharder writes `self_attn.rotary_emb.inv_freq` into every layer file as stored
+  (pinned), the runtime streams it into no layer (no `rotary_emb` key in any layer's active keys),
+  and the streamed model has no per-layer `rotary_emb` module, in both layouts.
+- **Controls**, all held: the default-rope resident differs from the yarn resident; zeroing the
+  router bias changes the logits; the FP8-dequantised resident differs from the bf16 resident; the
+  streamed config is a `DeepseekV3Config`, `model_type` `deepseek_v3`, no `auto_map`, no
+  `quantization_config` (both sources), and its decoder linears are plain `nn.Linear`.
+- **Deviation from the rule's wording**: the resident control is loaded with
+  `DeepseekV3ForCausalLM.from_pretrained(output_loading_info=True)` from a copy of the checkpoint
+  without the stale keys, and the test requires empty `missing_keys`, `unexpected_keys` and
+  `mismatched_keys`, instead of `load_state_dict(strict=True)` with the stale keys dropped.
+  transformers 5.17 saves the fused experts as per-expert keys (the real index's layout), which
+  only `from_pretrained`'s conversion maps back onto the fused module, so `load_state_dict` could
+  not load them. The check is at least as strict.
+- **Sensitivity** (section 6): the cells fail when the rewrite drops `rope_scaling` or changes
+  `rms_norm_eps`, when the loader stops taking the K2 path, and when `build_meta_skeleton` stops
+  using the loader.
+
+### G3, the real index: G3a PASS, G3b PASS
+
+**G3a.** The header map rebuilt from the real Base index names (sha256 `c1f1d16c...dcbc`) and the
+config has the index's 139,644 keys and file assignments, and its byte total equals the index's
+`metadata.total_size`, **1,029,173,256,720 B** (F8_E4M3 1,023,893,241,856; BF16 5,029,941,936; F32
+250,072,928). It equals, key for key, the map `tests/test_kimi_k2_streaming.py` derives from the
+config alone, which the test pins at the same count and total.
+
+**G3b.** The meta probe of the real config (61 layers, NF4, 5.0 s on the meta device) reports 11
+quantised suffixes: the five MLA projections, the dense MLP's three, and the shared expert's three;
+the router weight is not among them. Over the map, with `dtype=bfloat16`, arch `deepseek_v3`,
+double quantisation on and the 61 real source files, `estimate_shard_cache_bytes` refuses nothing
+and equals the shape-only oracle in every layer and outside the layers, in both layouts:
+
+| layout | layer payload | other payload | header + index allowance | total | RAM tier |
+|---|---|---|---|---|---|
+| per_expert | 528,527,512,320 | 4,697,635,904 | 21,460,490 + 25,216 | **533,246,633,930** | 9,779,755,776 |
+| fused | 2,034,454,168,320 | 4,697,635,904 | 330,710 + 25,472 | **2,039,152,160,406** | 2,039,151,803,136 |
+
+Layer 0 (dense) is 256,669,440 B in both; an MoE layer is 8,804,514,048 B per_expert (of which
+the experts file holds 8,724,089,856) and 33,903,291,648 B fused. The fused cache is 3.82x the
+per_expert one because the fused routed experts stay bf16 under NF4.
+
+Against the investigation's figures (533,246,623,322 and 2,039,152,149,798 B) both totals are
+**10,608 B higher**, the same in both layouts. Explained and reproduced: the investigation sized
+the map as one source file and the stale `inv_freq` at [32]. One file instead of 61 removes 60
+index entries (7,680 B of index allowance); [32] instead of [56] removes 61 x 24 x 2 = 2,928 B of
+payload; with both, the estimator returns exactly the investigation's two figures (scratch probe,
+`k2_g3_delta_probe.py`). The [56] here is the shape the index's `total_size` requires (G3a).
+
+What this means for a real run (arithmetic, not measured): under `quantization: 4bit` a Kimi K2
+layer cache needs about 533 GB of disk with `per_expert` and about 2.04 TB with `fused`; the
+`per_expert` RAM tier holds 9.8 GB (the routed experts are read from disk on every tier).
 
 ## 6. Mutation run
 
-(filled after the run)
+49 mutations of `src/soup_cli/utils/kimi_k2.py`, `src/soup_cli/trainer/stream_setup.py` and
+`src/soup_cli/utils/layer_stream_runtime.py`, one pytest process each over the named tests of
+`tests/test_kimi_k2_streaming.py` (scratch driver `k2_mutate.py`). Each file was restored byte for
+byte after its mutation (sha256 checked after each, and all three again at the end, equal to the
+files committed in `c5b723dfc`).
+
+- Every guard row: `architectures`, `topk_method`, `scoring_func`, `n_group`, `topk_group`,
+  `num_experts_per_tok` (the top-k rule, its integer check, the `norm_topk_prob` default),
+  `moe_layer_freq`, `ep_size`, `n_routed_experts`, `n_shared_experts`, `num_key_value_heads`,
+  `rope_interleave`; every `rope_scaling` condition (not a dict, `type`, `rope_type`, extra keys,
+  `factor`, `original_max_position_embeddings`, zero betas, the `mscale` rule and each of its two
+  halves); `quantization_config` (the FP8 refusal, other methods, a non-mapping); a non-mapping
+  config.
+- Each rewrite step: `model_type`, `auto_map`, the deep copy; and two config changes that must
+  break G2 (`rope_scaling` dropped, `rms_norm_eps` changed).
+- The loader: the K2 path, the guard call, the `trust_remote_code` branch, the revision kwargs to
+  each read, `name_or_path`; the message's truncation, `repr` and the rope key's rendering; the
+  tokenizer hint (the tiktoken clause, the K2-only check, the print); the setup's loader call, hint
+  call and re-raise; `build_meta_skeleton`'s loader call.
+
+**48 caught on the first run, 1 survived:** `num_experts_per_tok-bool` (dropping the integer check
+of the top-k rule). Its test case, `num_experts_per_tok: true`, was refused anyway, because
+`True >= 2` is false. The case was replaced by `8.0` (a float that passes the comparison) and `true`
+with `norm_topk_prob: false`; the mutation is then caught, and the re-run of it and of the
+`num_experts_per_tok` mutation caught both. Tests added after the mutation run only add assertions
+(the stale key in the layer files, the K2.5 refusal).

@@ -12,7 +12,8 @@
   (compressed-tensors INT4) is refused as `quantization_config.quant_method='compressed-tensors'`.
   A tiny K2-like checkpoint (the published config with tiny dimensions) streams bit for bit like a
   resident `DeepseekV3ForCausalLM` on the same weights (logits, loss, LoRA gradients; `fused` and
-  `per_expert`; bf16 and FP8 block), and the disk pre-flight sizes the published Base layout exactly
+  `per_expert`; bf16 and FP8 block), and the disk pre-flight sizes the published Base layout exactly:
+  533.2 GB per_expert and 2.04 TB fused under `quantization: 4bit`
   (`benchmarks/gate-kimi-k2-admission.md`; CPU only, no K2 weights downloaded, nothing trained on
   K2). K2's tokenizer is repository code: it needs `--trust-remote-code`, which reaches the tokenizer
   only, and `pip install tiktoken`, which Soup does not install; a failed tokenizer load on a K2
