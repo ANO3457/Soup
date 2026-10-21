@@ -891,6 +891,8 @@ class StreamingSetupMixin:
         from peft import TaskType
         from transformers import AutoTokenizer
 
+        from soup_cli.utils.kimi_k2 import load_stream_model_config
+
         # BEFORE the tokenizer load, the weight resolve and the shard write:
         # this configuration cannot work, and finding out minutes into disk I/O
         # is worse than finding out now.
@@ -898,7 +900,6 @@ class StreamingSetupMixin:
 
         from soup_cli.utils.expert_stream import EXPERT_LAYOUT_PER_EXPERT
         from soup_cli.utils.fp8_block import fp8_block_size
-        from soup_cli.utils.kimi_k2 import load_stream_model_config
         from soup_cli.utils.layer_shard import (
             PER_EXPERT_LAYOUT_ARCHS,
             QUANT_NF4,
