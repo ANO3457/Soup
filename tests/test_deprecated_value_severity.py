@@ -222,6 +222,17 @@ class TestQuantizationOnAnUnquantisedTask:
         )
         assert str(excinfo.value) == f": Value error, {_quant_refusal('8bit', fix)}"
 
+    @pytest.mark.parametrize("alias", ["false", "null"])
+    def test_error_does_not_name_an_alias_that_was_not_set(self, refuse, alias):
+        """``load_in_8bit: false`` / ``null`` did not set the value, so the refusal
+        must not tell the user to delete a ``load_in_8bit: true`` they never wrote."""
+        text = _PRM + f"training:\n  load_in_8bit: {alias}\n  quantization: 4bit\n"
+        with pytest.raises(ValueError) as excinfo:
+            loader.load_config_from_string(text)
+        message = str(excinfo.value)
+        assert "Delete the line or set quantization: none." in message, message
+        assert "load_in_8bit" not in message, message
+
     @pytest.mark.parametrize("training", ["", "training:\n  quantization: none\n"])
     def test_error_still_loads_an_unset_or_none_value(self, refuse, printed, training):
         """Control: the resolved default is not a deprecated value."""
