@@ -56,10 +56,11 @@ from soup_cli.utils.fp8_block import (
     SUPPORTED_FP8_FORMAT,
     FP8BlockPlan,
     UnsupportedFP8Error,
+    check_source_quantization,
     dequantize_fp8_block,
-    fp8_block_size,
     plan_fp8_block,
     read_checkpoint_quantization_config,
+    refuse_unsupported_tensor,
 )
 
 logger = logging.getLogger(__name__)
@@ -1000,6 +1001,11 @@ class SourceHeaderError(ValueError):
     """
 
 
+#: Stored types safetensors defines that ``safetensors_reader`` has no spelling for and a
+#: quantiser writes: packed or integer ones. FP8 spellings are left to the FP8 plan, and
+#: anything else (C64, a corrupt name) stays an unreadable header.
+_SAFETENSORS_ONLY_DTYPES = frozenset({"U16", "U32", "U64", "F4", "F6_E2M3", "F6_E3M2"})
+
 #: What reading and parsing one header can raise: a missing or unreadable file, a
 #: malformed header (``ValueError``), a null or nested dimension or offset
 #: (``TypeError``), an infinite one (``OverflowError``) and JSON nested deeper than
@@ -1016,13 +1022,27 @@ def _read_source_tensors(
     spelled twice, or more than ``_MAX_TOTAL_TENSORS`` across the files, is
     refused the way :func:`shard_checkpoint` refuses it.
     """
-    from soup_cli.utils.safetensors_reader import RAW_DTYPES, read_header
+    from soup_cli.utils.safetensors_reader import (
+        RAW_DTYPES,
+        UnsupportedDtypeError,
+        read_header,
+    )
 
     shapes: Dict[str, Tuple[str, Tuple[int, ...]]] = {}
     spelled: Dict[str, str] = {}
     for path in shard_paths:
         try:
             header = read_header(path)
+        except UnsupportedDtypeError as exc:
+            # A packed or integer type this reader has no spelling for (U32, U16, F4...):
+            # the sharder reads the header through safetensors and refuses that tensor
+            # (``plan_fp8_block``), so refuse it here in its words, before any copy.
+            # FP8 spellings it lacks (F8_E8M0) are the FP8 plan's to word: unread here.
+            if exc.dtype in _SAFETENSORS_ONLY_DTYPES:
+                refuse_unsupported_tensor(_canonical_stream_key(exc.tensor), exc.dtype)
+            raise SourceHeaderError(
+                f"cannot read the safetensors header of {path}: {exc}"
+            ) from exc
         except _HEADER_READ_ERRORS as exc:
             raise SourceHeaderError(
                 f"cannot read the safetensors header of {path}: {exc}"
@@ -1124,8 +1144,9 @@ def estimate_shard_cache_bytes(
     """
     if arch == "qwen4_exp":
         return None
-    # The config alone decides an unsupported FP8 spelling: refused before any header.
-    fp8_block_size(quantization_config, arch=arch)
+    # The config alone decides an unsupported FP8 spelling, or another declared
+    # quantiser: refused before any header, as the sharder refuses it.
+    check_source_quantization(quantization_config, arch=arch)
     if dtype not in _SUPPORTED_DTYPES:
         raise ValueError(
             f"unsupported dtype {dtype!r} for layer streaming; "
@@ -1857,9 +1878,10 @@ def shard_checkpoint(
 
     from safetensors import safe_open
 
-    # An FP8 spelling the config alone rules out is refused before any header is read.
+    # An FP8 spelling, or another quantiser, that the config alone rules out is refused
+    # before any header is read.
     source_quantization = read_checkpoint_quantization_config(weights_dir)
-    fp8_block_size(source_quantization, arch=arch)
+    check_source_quantization(source_quantization, arch=arch)
 
     # pass 1 — build key -> shard without materialising a single tensor
     where: Dict[str, Tuple[str, str]] = {}
@@ -1924,12 +1946,6 @@ def shard_checkpoint(
                 if match:
                     layer_ids.add(int(match.group(1)))
 
-    # Before any byte is read or written: every FP8 tensor must be a block weight with
-    # its scale, every scale must sit beside one (the disk pre-flight runs the same plan).
-    fp8_plan = plan_fp8_block(source_quantization, source_tensors, arch=arch)
-    consumed = _fp8_consumed_keys(fp8_plan)
-    del source_tensors
-
     oq_config = None
     if saw_oq_companion:
         from soup_cli.utils.oq_affine import load_affine_quant_config
@@ -1951,6 +1967,17 @@ def shard_checkpoint(
             for key in where
             if (match := _LAYER_RE.match(key)) is not None
         }
+
+    # Before any byte is read or written: every FP8 tensor must be a block weight with
+    # its scale, every scale must sit beside one, and no tensor read below may be a
+    # packed or integer one a plain read would cast (the disk pre-flight runs the same
+    # plan). Over the keys this sharder reads: an oQ bundle's vision and MTP weights
+    # are dropped above, never read.
+    fp8_plan = plan_fp8_block(
+        source_quantization, {key: source_tensors[key] for key in where}, arch=arch
+    )
+    consumed = _fp8_consumed_keys(fp8_plan)
+    del source_tensors
 
     if expert_layout and not any(_PER_EXPERT_RE.match(key) for key in where):
         raise ValueError(
@@ -2738,12 +2765,17 @@ def _refuse_fp8(key: str, stored_dtype: str) -> None:
     """The backstop under every plain read: an FP8 tensor or block scale that reaches a
     cast was not dequantised by an accepted :class:`FP8BlockPlan`. A plain cast keeps
     the raw e4m3 values and drops the scales, so the run would train on wrong weights
-    while the resident load (which dequantises) looks fine."""
+    while the resident load (which dequantises) looks fine.
+
+    So is any other tensor that is not plain floating point, or that a quantiser
+    named (:func:`~soup_cli.utils.fp8_block.refuse_unsupported_tensor`): the header
+    plan refuses those first, and this is what still stands if a path skips it."""
     if stored_dtype.upper().startswith("F8") or key.endswith("_scale_inv"):
         raise UnsupportedFP8Error(
             f"checkpoint tensor {key!r} is FP8 ({stored_dtype}) or an FP8 block scale "
             f"that would be cast without its scales. {SUPPORTED_FP8_FORMAT}"
         )
+    refuse_unsupported_tensor(key, stored_dtype)
 
 
 def _read_source_tensor(
