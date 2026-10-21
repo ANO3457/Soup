@@ -94,8 +94,10 @@ _ROPE_KEYS = frozenset(
         "mscale_all_dim",
     }
 )
-#: Longest rendering of a config value in a message; the value comes from an untrusted file.
+#: Longest rendering of a config value or key in a message; both come from an untrusted file.
 _BRIEF_LIMIT = 80
+#: Fields a refusal lists before "and N more": a file can hold any number of unexpected keys.
+_MAX_LISTED = 10
 _ABSENT = object()
 
 
@@ -111,15 +113,28 @@ class GuardFailure(NamedTuple):
     reason: str
 
 
-def _brief(value: Any) -> str:
-    """``repr`` of an untrusted value, truncated; ``absent`` for a missing one.
+def _bounded(text: str) -> str:
+    return text if len(text) <= _BRIEF_LIMIT else text[: _BRIEF_LIMIT - 3] + "..."
 
-    ``repr`` escapes control characters (ESC, BEL, U+202E ...), so none reaches a terminal raw.
+
+def _brief(value: Any) -> str:
+    """``ascii`` of an untrusted value, truncated; ``absent`` for a missing one.
+
+    ``ascii`` escapes every control and non-ASCII character (ESC, BEL, U+202E, a Cyrillic
+    homoglyph ...), so a value is shown as the bytes it is; the CLI's error printer then applies
+    ``for_terminal`` to the whole message (``utils/errors.py``).
     """
     if value is _ABSENT:
         return "absent"
-    text = repr(value)
-    return text if len(text) <= _BRIEF_LIMIT else text[: _BRIEF_LIMIT - 3] + "..."
+    return _bounded(ascii(value))
+
+
+def _key_name(key: Any) -> str:
+    """A top-level key as a refusal names it: a plain ASCII identifier as it is, anything else
+    through :func:`_brief`; both bounded."""
+    if isinstance(key, str) and key.isascii() and key.isidentifier():
+        return _bounded(key)
+    return _brief(key)
 
 
 def _is_int(value: Any) -> bool:
@@ -314,18 +329,21 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
     failures.extend(_quantization_failures(value("quantization_config")))
     # Last, so the registered rows above keep their order (added in the review round).
     for key in raw:
-        if key not in _ALLOWED_KEYS:
-            name = key if isinstance(key, str) and key.isascii() and key.isidentifier() else (
-                _brief(key)
-            )
+        if key not in _ALLOWED_KEYS:  # whatever the value, null included
+            name = _key_name(key)
+            quoted = name if name.startswith(("'", '"')) else f"'{name}'"
             failures.append(
-                GuardFailure(name, _brief(raw[key]), _UNEXPECTED_REASON.format(name=repr(name)))
+                GuardFailure(name, _brief(raw[key]), _UNEXPECTED_REASON.format(name=quoted))
             )
     return tuple(failures)
 
 
 def _refusal(failures: Tuple[GuardFailure, ...]) -> UnsupportedKimiK2Error:
-    listed = "; ".join(f"{item.field}={item.value} ({item.reason})" for item in failures)
+    listed = "; ".join(
+        f"{item.field}={item.value} ({item.reason})" for item in failures[:_MAX_LISTED]
+    )
+    if len(failures) > _MAX_LISTED:
+        listed += f"; and {len(failures) - _MAX_LISTED} more"
     return UnsupportedKimiK2Error(
         f"Kimi K2 (model_type '{KIMI_K2_MODEL_TYPE}') streams through transformers' own "
         f"DeepseekV3 class, admitted only for a config it computes like K2's own modelling "

@@ -494,6 +494,8 @@ _REFUSED = [
     ("rope_interleave-true", {"rope_interleave": True}, "rope_interleave", "True"),
     ("pad_token_id", {"pad_token_id": 163839}, "pad_token_id", "163839"),
     ("sliding_window", {"sliding_window": 4096}, "sliding_window", "4096"),
+    # Round-2 review: a null value of a key outside the allowlist is refused like any other.
+    ("head_dim-null", {"head_dim": None}, "head_dim", "None"),
 ]
 
 
@@ -642,6 +644,43 @@ def test_a_refusal_never_quotes_raw_control_bytes_and_stays_short():
     message = str(caught.value)
     assert "\x1b" not in message and "\u202e" not in message and "\x07" not in message
     assert len(message) < 2500
+
+
+def test_non_ascii_key_names_and_values_are_shown_escaped():
+    """Round-2 review: a homoglyph key (Cyrillic U+0435 in "head_dim") or value (U+043E in
+    "noaux_tc") must not reach the message raw, where it would read as the ASCII name."""
+    from soup_cli.utils.kimi_k2 import UnsupportedKimiK2Error, kimi_k2_native_config_dict
+
+    key = "h" + chr(0x435) + "ad_dim"
+    value = "n" + chr(0x43E) + "aux_tc"
+    raw = _base(topk_method=value)
+    raw[key] = 128
+    with pytest.raises(UnsupportedKimiK2Error) as caught:
+        kimi_k2_native_config_dict(raw)
+    message = str(caught.value)
+    assert message.isascii()
+    assert "u0435" in message and "u043e" in message
+
+
+def test_a_refusal_stays_bounded_whatever_the_key_names_and_their_number():
+    """Round-2 review: a 200,000-character identifier key gave a 400 KB message."""
+    from soup_cli.utils.kimi_k2 import (
+        UnsupportedKimiK2Error,
+        kimi_k2_guard_failures,
+        kimi_k2_native_config_dict,
+    )
+
+    raw = _base()
+    raw["k" * 200_000] = 1
+    for idx in range(99):
+        raw[f"extra_field_{idx}"] = idx
+    assert len(kimi_k2_guard_failures(raw)) == 100
+    with pytest.raises(UnsupportedKimiK2Error) as caught:
+        kimi_k2_native_config_dict(raw)
+    message = str(caught.value)
+    assert len(message) < 3000
+    assert "and 90 more" in message
+    assert "k" * 81 not in message
 
 
 def test_the_guard_reads_a_mapping_only():
@@ -1366,6 +1405,31 @@ def test_the_setup_loads_the_model_config_through_the_k2_loader(tmp_path, monkey
     monkeypatch.setattr(kimi_k2, "load_stream_model_config", _loader)
     _drive_qwen4_streaming_setup(tmp_path, monkeypatch, arch="deepseek_v3", model_cfg=model_cfg)
     assert seen == [("qwen4-test", {"trust_remote_code": False})]
+
+
+def test_trust_remote_code_reaches_the_tokenizer_but_never_the_streamed_config(
+    tmp_path, monkeypatch
+):
+    """Round-2 review: with --trust-remote-code the config loader must still get False, or a K2
+    base would run its repository's configuration code; the tokenizer keeps the user's flag."""
+    import soup_cli.utils.kimi_k2 as kimi_k2
+    from tests.test_issue602_qwen4_ple_streaming import _drive_qwen4_streaming_setup
+
+    seen = []
+    model_cfg = _deepseek_setup_cfg()
+
+    def _loader(base, **kwargs):
+        seen.append(kwargs)
+        return model_cfg
+
+    calls = {}
+    monkeypatch.setattr(kimi_k2, "load_stream_model_config", _loader)
+    _drive_qwen4_streaming_setup(
+        tmp_path, monkeypatch, arch="deepseek_v3", model_cfg=model_cfg, load_calls=calls,
+        trust_remote_code=True,
+    )
+    assert [kwargs["trust_remote_code"] for kwargs in seen] == [False]
+    assert [call["trust_remote_code"] for call in calls["tokenizer"]] == [True]
 
 
 def test_the_setup_refuses_a_guard_failure_before_resolving_any_weight(tmp_path, monkeypatch):

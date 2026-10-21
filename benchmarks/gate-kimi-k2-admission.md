@@ -511,3 +511,32 @@ reading the code. Line 56 of `modeling_deepseek.py` imports `is_torch_fx_availab
 `transformers.utils.import_utils`, and transformers 5.17.0 does not define that name (checked by
 `hasattr` and in its source); every other name the file imports from transformers exists. The docs
 now state it this way.
+
+### Round 2: review READY, survivors killed
+
+The second review returned READY. It confirmed that the allowlist equals the union of the real Base
+and Instruct keys (45 of 45), that all first-round holes are closed, and that the Moonlight cache
+is unchanged. Under the house rule, each survivor it listed now has a test that kills it:
+
+- **r2.** The setup could have handed the user's `trust_remote_code` to the config loader without
+  any test noticing, because every test ran with the flag off. A K2 base would then run its
+  repository's configuration code. The new test
+  `test_trust_remote_code_reaches_the_tokenizer_but_never_the_streamed_config` drives the setup
+  with the flag on: the loader gets `False`, and the tokenizer gets `True`.
+- **r1.** A key outside the allowlist with a null value is refused like any other value: refusal
+  case `head_dim: null`.
+- **r3.** A non-ASCII key name was shown raw. Refusals now render key names and values with
+  `ascii()`, which escapes every control and non-ASCII character, so a Cyrillic homoglyph cannot
+  read as an ASCII name; the CLI's error printer then applies `for_terminal`. Pinned by
+  `test_non_ascii_key_names_and_values_are_shown_escaped`.
+- **LOW 1.** A 200,000-character identifier key produced a 400 KB message. Key names are now always
+  bounded to 80 characters, and a refusal lists at most 10 fields, then "and N more". Pinned by
+  `test_a_refusal_stays_bounded_whatever_the_key_names_and_their_number`.
+- **LOW 2** (a known limit; no code change): `quantization_config` is checked only by
+  `fp8_block_size`. Its sub-keys are not allowlisted against K2's published ones, so for example
+  `weight_block_size: [64, 64]` or a `modules_to_not_convert` list is admitted. Nothing in Soup reads
+  `modules_to_not_convert` today.
+
+Mutants: r1, r2, r3 (on the key and on the value) and three for LOW 1 (unbounded name, uncapped list,
+no "and N more"). All 7 caught, with sha256 verified. `tests/test_kimi_k2_streaming.py`: 131
+passed. G1b now has 51 refusal cases and 17 admitted variants.
