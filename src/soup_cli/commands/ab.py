@@ -22,7 +22,6 @@ from soup_cli.utils.ab_test import (
     run_msprt,
     validate_metric_name,
 )
-from soup_cli.utils.exit_codes import EXIT_USAGE_ERROR
 
 console = Console()
 
@@ -90,7 +89,8 @@ def ab(
                 "[red]Error: "
                 f"{escape(retired_beta_message('--beta', '--alpha'))} {deadline_clause()}[/]"
             )
-            raise typer.Exit(EXIT_USAGE_ERROR)
+            # Exit 2, like soup ab's other flag errors (--metric, --alpha).
+            raise typer.Exit(2)
         console.print(
             "[yellow]Warning: "
             f"{escape(retired_beta_message('--beta', '--alpha'))} {deadline_clause()}[/]"

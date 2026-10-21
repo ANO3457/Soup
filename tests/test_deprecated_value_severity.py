@@ -298,10 +298,9 @@ class TestRetiredBeta:
         assert "decision accept_h0" in out
 
     def test_error_cli_refuses_beta_with_a_usage_error(self, refuse, tmp_path, monkeypatch):
-        from soup_cli.utils.exit_codes import EXIT_USAGE_ERROR
-
+        # Exit 2, the code soup ab already uses for its other flag errors.
         result = _run_ab(tmp_path, monkeypatch, "--beta", "0.95")
-        assert result.exit_code == EXIT_USAGE_ERROR == 3, (
+        assert result.exit_code == 2, (
             result.output,
             repr(result.exception),
         )
