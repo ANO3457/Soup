@@ -897,7 +897,7 @@ class StreamingSetupMixin:
         refuse_if_data_parallel(self.device)
 
         from soup_cli.utils.expert_stream import EXPERT_LAYOUT_PER_EXPERT
-        from soup_cli.utils.fp8_block import check_source_quantization
+        from soup_cli.utils.fp8_block import check_source_quantization, quantization_config_of
         from soup_cli.utils.layer_shard import (
             PER_EXPERT_LAYOUT_ARCHS,
             QUANT_NF4,
@@ -982,7 +982,8 @@ class StreamingSetupMixin:
         # bitsandbytes, ...) is refused here from the config alone: before any weight is
         # resolved or downloaded. The disk pre-flight sizes the cache from the same
         # config (the shards hold dequantised weights, the scales are not stored).
-        source_quantization = getattr(model_config, "quantization_config", None)
+        # The top-level declaration, or a multimodal wrapper's text_config one.
+        source_quantization = quantization_config_of(model_config)
         fp8_block = check_source_quantization(source_quantization, arch=arch)
 
         on_cuda = str(self.device).startswith("cuda")

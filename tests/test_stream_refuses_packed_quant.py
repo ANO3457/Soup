@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import types
 
 import pytest
@@ -358,10 +359,8 @@ def test_a_transformers_quantization_config_object_is_read_too():
         {"group_size": 64, "bits": 4, "model.layers.0.mlp.gate": {"bits": 8, "group_size": 64}},
         {"quant_method": None},
         {"load_in_4bit": False, "load_in_8bit": False},
-        "fp8",
     ],
-    ids=["none", "empty", "oq-affine", "mlx-overrides", "null-method", "bnb-flags-off",
-         "not-a-mapping"],
+    ids=["none", "empty", "oq-affine", "mlx-overrides", "null-method", "bnb-flags-off"],
 )
 def test_a_config_that_declares_no_quantiser_passes_the_gate(config):
     """The oMLX/oQ affine spelling declares no quant_method: its tensors decide."""
@@ -944,3 +943,309 @@ def test_a_refusal_never_quotes_raw_control_bytes():
     for caught in (by_config, by_format, by_kind, by_tensor):
         message = str(caught.value)
         assert not any(ord(char) < 32 for char in message), message
+
+
+# ==========================================================================
+# review round: the refusal comes before anything is created, renamed or reused
+# ==========================================================================
+def _tree_state(directory):
+    """name -> bytes of every file under ``directory`` (a cache is small here)."""
+    state = {}
+    for base, _dirs, files in os.walk(directory):
+        for name in files:
+            path = os.path.join(base, name)
+            with open(path, "rb") as handle:
+                state[os.path.relpath(path, directory)] = handle.read()
+    return state
+
+
+def _int32_llama(directory):
+    """A llama source with no quantization_config and one int32 decoder weight."""
+    import torch
+
+    state = _dense_state()
+    state["model.layers.1.mlp.down_proj.weight"] = torch.zeros((HIDDEN, INTER), dtype=torch.int32)
+    return _write(directory, state, model_type="llama")
+
+
+@pytest.mark.parametrize("source", ["k2-config", "int32-no-config"])
+def test_a_refusal_creates_no_cache_folder(tmp_path, source):
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    if source == "k2-config":
+        weights = _write(tmp_path / "w", _k2_state(), quant=K2_THINKING_QUANT)
+    else:
+        weights = _int32_llama(tmp_path / "w")
+    arch = "deepseek_v3" if source == "k2-config" else "llama"
+    out = tmp_path / "cache" / "model"
+    with pytest.raises(ValueError, match=_TAIL):
+        shard_checkpoint(weights, str(out), dtype="bfloat16", arch=arch)
+    assert not out.exists()
+    assert not (tmp_path / "cache").exists()
+
+
+def test_a_refusal_creates_no_stripe_folder(tmp_path):
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = _int32_llama(tmp_path / "w")
+    stripe = tmp_path / "second-drive"
+    stripe.mkdir()
+    with pytest.raises(ValueError, match=_TAIL):
+        shard_checkpoint(
+            weights, str(tmp_path / "cache" / "model"), dtype="bfloat16", arch="llama",
+            stripe_roots=[str(stripe)],
+        )
+    assert os.listdir(stripe) == []
+
+
+def test_a_refused_source_leaves_a_valid_prior_cache_untouched(tmp_path):
+    """A good cache, then the source replaced by one that is refused: the cache miss used
+    to quarantine index.json (renamed to index.json.resharding) before the refusal."""
+    import shutil
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = tmp_path / "w"
+    _write(weights, _dense_state(), model_type="llama")
+    out = tmp_path / "cache"
+    shard_checkpoint(str(weights), str(out), dtype="bfloat16", arch="llama")
+    before = _tree_state(out)
+    assert "index.json" in before
+
+    shutil.rmtree(weights)
+    _int32_llama(weights)
+    with pytest.raises(ValueError, match="is stored as 'I32'"):
+        shard_checkpoint(str(weights), str(out), dtype="bfloat16", arch="llama")
+    assert _tree_state(out) == before
+    assert not (out / "index.json.resharding").exists()
+
+
+def test_a_cache_sharded_before_the_refusal_existed_is_not_reused(tmp_path, monkeypatch):
+    """A cache that older code wrote from an int32 source (no quantization_config) is a
+    cache HIT for the same source: the refusal must not sit behind the hit's return."""
+    import soup_cli.utils.layer_shard as layer_shard
+    from soup_cli.utils.fp8_block import _classify_fp8
+
+    weights = _int32_llama(tmp_path / "w")
+    out = tmp_path / "cache"
+    with monkeypatch.context() as old_code:  # the sharder as it was: FP8 checks only
+        old_code.setattr(layer_shard, "plan_fp8_block", _classify_fp8)
+        old_code.setattr(layer_shard, "refuse_unsupported_tensor", lambda *_a, **_k: None)
+        layer_shard.shard_checkpoint(weights, str(out), dtype="bfloat16", arch="llama")
+    before = _tree_state(out)
+    with pytest.raises(ValueError, match="is stored as 'I32'"):
+        layer_shard.shard_checkpoint(weights, str(out), dtype="bfloat16", arch="llama")
+    assert _tree_state(out) == before
+
+
+def test_the_setup_refuses_a_bad_source_in_the_preflight(tmp_path, monkeypatch):
+    """No quantization_config, so the config gate passes; the disk pre-flight reads the
+    headers and refuses there: before its cache lookup, before the resolver goes on to
+    copy anything, and before the sharder."""
+    from tests.test_issue602_qwen4_ple_streaming import _drive_qwen4_streaming_setup
+
+    weights = _write(tmp_path / "k2", _k2_state())
+    size = os.path.getsize(os.path.join(weights, "model.safetensors"))
+    plan = types.SimpleNamespace(
+        weights_dir=weights, source_dir=weights, source_bytes=size, materialized_copy_bytes=0,
+        materialize_bytes=0, needs_materialization=False,
+        source_files=(("model.safetensors", size, 0),), source_revision=None,
+    )
+
+    def _resolve(_base, *, before_materialize=None):
+        before_materialize(plan)
+        raise AssertionError("the resolver went on past a source that cannot stream")
+
+    model_cfg = types.SimpleNamespace(
+        model_type="deepseek_v3", hidden_size=HIDDEN, num_hidden_layers=LAYERS,
+        vocab_size=VOCAB, intermediate_size=INTER, quantization_config=None,
+    )
+    with pytest.raises(ValueError, match="weight_packed' is stored as 'I32'"):
+        _drive_qwen4_streaming_setup(
+            tmp_path, monkeypatch, resolve_weights=_resolve, arch="deepseek_v3",
+            model_cfg=model_cfg,
+        )
+
+
+# ==========================================================================
+# review round: the four surviving mutants
+# ==========================================================================
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model.xposition_ids",
+        "model.layers.0.xple.ple_embedding.layer_multipliers",
+        "model.layers.0.xple.ple_embedding.ngram_heads_vocab_sizes",
+        "model.layers.0.xple.ple_embedding.ngram_heads_offsets",
+    ],
+)
+def test_an_integer_buffer_is_matched_by_its_whole_last_names(key):
+    """Each exemption starts at a dot: a name that merely ends in the same letters is
+    another tensor, and an int64 one is refused."""
+    from soup_cli.utils.fp8_block import UnsupportedQuantizedSourceError, refuse_unsupported_tensor
+
+    with pytest.raises(UnsupportedQuantizedSourceError, match="'I64'"):
+        refuse_unsupported_tensor(key, "I64")
+
+
+@pytest.mark.parametrize("raw", ["F6_E2M3", "F6_E3M2", "F4", "U16", "U32", "U64"])
+def test_every_header_only_quantiser_type_is_refused_by_the_preflight(tmp_path, raw):
+    """Types the pre-flight's header reader has no spelling for, written by MX/NVFP4 and
+    MLX quantisers: refused by name, not sized at a guess."""
+    import struct
+
+    from soup_cli.utils.fp8_block import UnsupportedQuantizedSourceError
+    from soup_cli.utils.layer_shard import estimate_shard_cache_bytes
+
+    payload = json.dumps(
+        {"model.layers.0.mlp.down_proj.weight": {
+            "dtype": raw, "shape": [4, 4], "data_offsets": [0, 12]}}
+    ).encode()
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(struct.pack("<Q", len(payload)) + payload + b"\0" * 12)
+    with pytest.raises(UnsupportedQuantizedSourceError) as caught:
+        estimate_shard_cache_bytes([str(path)], dtype="bfloat16", arch="llama")
+    assert f"is stored as {raw!r}" in str(caught.value)
+
+
+@pytest.mark.parametrize("method", ["FP8", "Fp8", "fp8 ", " fp8"])
+def test_quant_method_fp8_is_matched_exactly_as_transformers_matches_it(method):
+    """transformers looks the method up as an exact key (``AUTO_QUANTIZATION_CONFIG_MAPPING``
+    has 'fp8' only; 'FP8' is an unknown quantisation type to it). So is it here: any other
+    spelling is a quantiser layer streaming does not read, refused naming it."""
+    from soup_cli.utils.fp8_block import UnsupportedQuantizedSourceError, check_source_quantization
+
+    config = {**DEEPSEEK_FP8, "quant_method": method}
+    with pytest.raises(UnsupportedQuantizedSourceError) as caught:
+        check_source_quantization(config, arch="deepseek_v3")
+    assert f"declares quant_method {method!r}" in str(caught.value)
+
+
+def test_transformers_matches_quant_method_case_sensitively():
+    pytest.importorskip("transformers")
+    from transformers.quantizers.auto import AUTO_QUANTIZATION_CONFIG_MAPPING
+
+    assert "fp8" in AUTO_QUANTIZATION_CONFIG_MAPPING
+    assert "FP8" not in AUTO_QUANTIZATION_CONFIG_MAPPING
+    assert all(name == name.lower() for name in AUTO_QUANTIZATION_CONFIG_MAPPING)
+
+
+@pytest.mark.parametrize("bits", [4, 6, 16])
+def test_a_compressed_tensors_float_group_is_fp8_only_at_eight_bits(bits):
+    """NVFP4 declares float weights of 4 bits: that is not an FP8 format."""
+    from soup_cli.utils.fp8_block import (
+        UnsupportedFP8Error,
+        UnsupportedQuantizedSourceError,
+        check_source_quantization,
+    )
+
+    config = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"g": {"weights": {"num_bits": bits, "type": "float"}}},
+    }
+    with pytest.raises(UnsupportedQuantizedSourceError) as caught:
+        check_source_quantization(config, arch="deepseek_v3")
+    assert not isinstance(caught.value, UnsupportedFP8Error)
+    assert f"({bits}-bit float weights)" in str(caught.value)
+
+
+# ==========================================================================
+# review round: a malformed or nested quantization_config
+# ==========================================================================
+@pytest.mark.parametrize(
+    "value", ["fp8", ["fp8"], 4, True, False, 0.5], ids=["str", "list", "int", "true",
+                                                         "false", "float"]
+)
+def test_a_quantization_config_that_is_not_a_mapping_is_refused_as_malformed(tmp_path, value):
+    """It used to be read as 'no quantization_config' and pass the gate."""
+    from soup_cli.utils.fp8_block import UnsupportedQuantizedSourceError, check_source_quantization
+    from soup_cli.utils.layer_shard import estimate_shard_cache_bytes, shard_checkpoint
+
+    weights = _corrupt_checkpoint_with_config(tmp_path / "w", value)
+    with pytest.raises(UnsupportedQuantizedSourceError) as gate:
+        check_source_quantization(value, arch="deepseek_v3")
+    assert f"quantization_config is {value!r}" in str(gate.value)
+    assert "not a mapping" in str(gate.value)
+    with pytest.raises(ValueError) as sharder:
+        shard_checkpoint(weights, str(tmp_path / "s"), dtype="bfloat16", arch="deepseek_v3")
+    with pytest.raises(ValueError) as estimator:
+        estimate_shard_cache_bytes(
+            [os.path.join(weights, "model.safetensors")], dtype="bfloat16",
+            arch="deepseek_v3", quantization_config=value,
+        )
+    assert str(sharder.value) == str(estimator.value) == str(gate.value)
+
+
+def test_a_quantization_config_under_text_config_is_read_too(tmp_path):
+    from soup_cli.utils.fp8_block import read_checkpoint_quantization_config
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = tmp_path / "w"
+    weights.mkdir()
+    (weights / "model.safetensors").write_bytes(b"\xff" * 64)
+    (weights / "config.json").write_text(
+        json.dumps({"model_type": "deepseek_v3",
+                    "text_config": {"quantization_config": K2_THINKING_QUANT}}),
+        encoding="utf-8",
+    )
+    assert read_checkpoint_quantization_config(str(weights)) == K2_THINKING_QUANT
+    with pytest.raises(ValueError, match=re.escape(K2_NEEDLE)):
+        shard_checkpoint(str(weights), str(tmp_path / "s"), dtype="bfloat16", arch="deepseek_v3")
+
+
+def test_the_top_level_quantization_config_wins_over_the_nested_one(tmp_path):
+    from soup_cli.utils.fp8_block import quantization_config_of
+
+    nested = {"quantization_config": {"quant_method": "gptq"}}
+    assert quantization_config_of(
+        {"quantization_config": DEEPSEEK_FP8, "text_config": nested}
+    ) == DEEPSEEK_FP8
+    assert quantization_config_of({"text_config": nested}) == {"quant_method": "gptq"}
+    assert quantization_config_of({"text_config": "gptq"}) is None
+    assert quantization_config_of({}) is None
+    config = types.SimpleNamespace(
+        quantization_config=None, text_config=types.SimpleNamespace(quantization_config=None)
+    )
+    assert quantization_config_of(config) is None
+    config.text_config.quantization_config = {"quant_method": "awq"}
+    assert quantization_config_of(config) == {"quant_method": "awq"}
+
+
+def test_the_setup_reads_a_nested_quantization_config(tmp_path, monkeypatch):
+    from tests.test_issue602_qwen4_ple_streaming import _drive_qwen4_streaming_setup
+
+    def _must_not_resolve(*_args, **_kwargs):
+        raise AssertionError("weights resolved for a base that cannot stream")
+
+    model_cfg = types.SimpleNamespace(
+        model_type="deepseek_v3", hidden_size=HIDDEN, num_hidden_layers=LAYERS,
+        vocab_size=VOCAB, intermediate_size=INTER, quantization_config=None,
+        text_config=None,
+    )
+    model_cfg.text_config = types.SimpleNamespace(
+        model_type="deepseek_v3", hidden_size=HIDDEN, num_hidden_layers=LAYERS,
+        vocab_size=VOCAB, intermediate_size=INTER, quantization_config=K2_THINKING_QUANT,
+    )
+    with pytest.raises(ValueError, match=re.escape(K2_NEEDLE)):
+        _drive_qwen4_streaming_setup(
+            tmp_path, monkeypatch, resolve_weights=_must_not_resolve, arch="deepseek_v3",
+            model_cfg=model_cfg,
+        )
+
+
+# ==========================================================================
+# review round: the header reader's error survives pickling and copying
+# ==========================================================================
+def test_the_unsupported_dtype_error_round_trips_through_pickle_and_copy():
+    import copy
+    import pickle
+
+    from soup_cli.utils.safetensors_reader import UnsupportedDtypeError
+
+    error = UnsupportedDtypeError("w.safetensors: tensor 'x' ...", tensor="x", dtype="U32")
+    for clone in (pickle.loads(pickle.dumps(error)), copy.copy(error), copy.deepcopy(error)):
+        assert type(clone) is UnsupportedDtypeError
+        assert str(clone) == str(error)
+        assert (clone.tensor, clone.dtype) == ("x", "U32")
+    bare = UnsupportedDtypeError("message only")
+    assert (bare.tensor, bare.dtype) == ("", None)

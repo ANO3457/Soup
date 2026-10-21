@@ -741,7 +741,9 @@ def test_the_estimate_refuses_an_fp8_config_spelling_before_reading_a_header(tmp
         (b"", None),
         (b"not json", None),
         (b"[1, 2]", None),
-        (b'{"quantization_config": "fp8"}', None),
+        # Returned as found since the review round of the packed-quant refusal: the
+        # gate refuses a declaration that is not a mapping as malformed.
+        (b'{"quantization_config": "fp8"}', "fp8"),
         (b'{"model_type": "deepseek_v3"}', None),
         (b'{"quantization_config": {"quant_method": "fp8"}}', {"quant_method": "fp8"}),
     ],

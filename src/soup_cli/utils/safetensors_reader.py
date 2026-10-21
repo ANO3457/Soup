@@ -148,10 +148,12 @@ class UnsupportedDtypeError(ValueError):
     A ``ValueError`` like every other malformed-header refusal here; its own type so the
     layer-stream disk pre-flight can refuse that tensor in the sharder's words
     (``layer_shard._read_source_tensors``) instead of treating the header as unreadable.
-    ``tensor`` and ``dtype`` are the header's own (untrusted) strings.
+    ``tensor`` and ``dtype`` are the header's own (untrusted) strings. Both have defaults
+    so the exception rebuilds from its message alone, as ``pickle`` and ``copy`` rebuild
+    it (its attributes then come back from its ``__dict__``).
     """
 
-    def __init__(self, message: str, *, tensor: str, dtype: object) -> None:
+    def __init__(self, message: str, *, tensor: str = "", dtype: object = None) -> None:
         super().__init__(message)
         self.tensor = tensor
         self.dtype = dtype

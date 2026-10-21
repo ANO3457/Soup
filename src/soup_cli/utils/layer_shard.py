@@ -1765,6 +1765,13 @@ def shard_checkpoint(
     are stacked or written to their experts file, cast to the stream dtype and then
     stored by the rules above. The scales are consumed and never stored. Any other
     FP8 spelling is refused before anything is written.
+
+    Every other quantised source is refused too (``fp8_block.check_source_quantization``
+    and the header plan, :func:`~soup_cli.utils.fp8_block.plan_fp8_block`). The source
+    is checked first, from its ``config.json`` and headers alone, before ``out_dir`` or
+    a stripe folder is made, a cache is looked up or an index is quarantined: a refused
+    source creates and renames nothing, and a cache older code sharded from it is not
+    reused.
     """
     if expert_layout not in ("", EXPERT_LAYOUT_PER_EXPERT):
         raise ValueError(
@@ -1805,79 +1812,12 @@ def shard_checkpoint(
     fp32_layer_keys = layer_buffer_keys(arch)
     drop_extra_layers = arch == "deepseek_v3" and num_hidden_layers is not None
     shards = _discover_safetensors(weights_dir)
-    resolved_out = _validate_out_dir(out_dir)
-
-    from soup_cli.utils.stripe_roots import (
-        STRIPE_DIRS_ENV,
-        StripeRootError,
-        layer_roots_for,
-        primary_cache_identity,
-        secure_stripe_folder,
-        stripe_folder_problem,
-        validate_stripe_root,
-    )
-
-    # Bound our own writes (syntax, existence, symlink, overlap). The distinct-volume and
-    # NVMe rules ran once at setup (resolve_stripe_roots); the ~9 s probe is not repeated.
-    validated: List[str] = []
-    for root in stripe_roots:
-        validated.append(
-            validate_stripe_root(
-                root, primary_root=os.path.dirname(resolved_out), accepted=validated
-            )
-        )
-    stripe = tuple(validated)
-    # Before anything reads, writes or deletes in a stripe folder: it must not be a link or
-    # junction, and it is made (or re-made) owner-only — on the reuse path too, since that is
-    # the path that trusts files already on the drive. A folder that fails refuses the run.
-    shard_dirs = stripe_dirs(resolved_out, stripe)
-    for directory, root in zip(shard_dirs[1:], stripe):
-        secure_stripe_folder(directory, root)
-
-    source_files = checkpoint_source_components(
-        weights_dir,
-        _source_file_components(shards),
-        include_config=source_identity_includes_config(arch),
-    )
-    fingerprint = _fingerprint_components(source_files)
-    if not force:
-        cached, miss_reason = inspect_shard_cache(
-            resolved_out,
-            dtype,
-            fingerprint,
-            source_files,
-            quant,
-            double_quant,
-            device_kind,
-            external_mode,
-            stripe_roots=stripe,
-            expert_layout=expert_layout,
-        )
-        if cached is not None:
-            if notify is not None:
-                _notify_unindexed_cache_files(resolved_out, cached, notify)
-            return cached
-        if notify is not None:
-            from soup_cli.utils.terminal import for_terminal
-
-            # The reason can carry paths from the index, the variable and stripe drives: printed
-            # as text, never as markup or raw control bytes.
-            notify(f"[yellow]Re-sharding layer cache:[/] {for_terminal(miss_reason)}.")
-            _notify_orphaned_stripes(resolved_out, stripe, notify)
-        if _content_change_requires_index_quarantine(
-            resolved_out,
-            dtype=dtype,
-            fingerprint=fingerprint,
-            quant=quant,
-            double_quant=double_quant,
-            quant_device=device_kind,
-            external_mode=external_mode,
-            expert_layout=expert_layout,
-        ):
-            _quarantine_shard_index(resolved_out)
-
     from safetensors import safe_open
 
+    # Every check of the SOURCE comes first, before the out dir is made, a stripe
+    # folder secured, a cache looked up or an index quarantined: a refused source
+    # creates and renames nothing, and a cache sharded from it by older code is not
+    # reused (its hit would return before any later check). Headers only, no tensor.
     # An FP8 spelling, or another quantiser, that the config alone rules out is refused
     # before any header is read.
     source_quantization = read_checkpoint_quantization_config(weights_dir)
@@ -1978,6 +1918,77 @@ def shard_checkpoint(
     )
     consumed = _fp8_consumed_keys(fp8_plan)
     del source_tensors
+
+    resolved_out = _validate_out_dir(out_dir)
+
+    from soup_cli.utils.stripe_roots import (
+        STRIPE_DIRS_ENV,
+        StripeRootError,
+        layer_roots_for,
+        primary_cache_identity,
+        secure_stripe_folder,
+        stripe_folder_problem,
+        validate_stripe_root,
+    )
+
+    # Bound our own writes (syntax, existence, symlink, overlap). The distinct-volume and
+    # NVMe rules ran once at setup (resolve_stripe_roots); the ~9 s probe is not repeated.
+    validated: List[str] = []
+    for root in stripe_roots:
+        validated.append(
+            validate_stripe_root(
+                root, primary_root=os.path.dirname(resolved_out), accepted=validated
+            )
+        )
+    stripe = tuple(validated)
+    # Before anything reads, writes or deletes in a stripe folder: it must not be a link or
+    # junction, and it is made (or re-made) owner-only — on the reuse path too, since that is
+    # the path that trusts files already on the drive. A folder that fails refuses the run.
+    shard_dirs = stripe_dirs(resolved_out, stripe)
+    for directory, root in zip(shard_dirs[1:], stripe):
+        secure_stripe_folder(directory, root)
+
+    source_files = checkpoint_source_components(
+        weights_dir,
+        _source_file_components(shards),
+        include_config=source_identity_includes_config(arch),
+    )
+    fingerprint = _fingerprint_components(source_files)
+    if not force:
+        cached, miss_reason = inspect_shard_cache(
+            resolved_out,
+            dtype,
+            fingerprint,
+            source_files,
+            quant,
+            double_quant,
+            device_kind,
+            external_mode,
+            stripe_roots=stripe,
+            expert_layout=expert_layout,
+        )
+        if cached is not None:
+            if notify is not None:
+                _notify_unindexed_cache_files(resolved_out, cached, notify)
+            return cached
+        if notify is not None:
+            from soup_cli.utils.terminal import for_terminal
+
+            # The reason can carry paths from the index, the variable and stripe drives: printed
+            # as text, never as markup or raw control bytes.
+            notify(f"[yellow]Re-sharding layer cache:[/] {for_terminal(miss_reason)}.")
+            _notify_orphaned_stripes(resolved_out, stripe, notify)
+        if _content_change_requires_index_quarantine(
+            resolved_out,
+            dtype=dtype,
+            fingerprint=fingerprint,
+            quant=quant,
+            double_quant=double_quant,
+            quant_device=device_kind,
+            external_mode=external_mode,
+            expert_layout=expert_layout,
+        ):
+            _quarantine_shard_index(resolved_out)
 
     if expert_layout and not any(_PER_EXPERT_RE.match(key) for key in where):
         raise ValueError(

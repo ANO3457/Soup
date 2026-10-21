@@ -311,18 +311,27 @@ def _compressed_tensors_detail(quant: Mapping[str, Any]) -> Tuple[str, bool]:
 def refuse_unsupported_quantization(quantization_config: Any) -> None:
     """Refuse a ``quantization_config`` declaring a quantiser layer streaming cannot read.
 
-    Passes no config, a config that declares no quantiser (the oMLX/oQ affine spelling,
+    Passes no config (``None``), a config that declares no quantiser (the oMLX/oQ affine
+    spelling,
     ``bits`` and ``group_size`` without a ``quant_method``, whose tensors decide) and
     ``quant_method: "fp8"``, which :func:`fp8_block_size` decides. Every other
     ``quant_method`` is refused naming it: the ones transformers registers
     (compressed-tensors in any format, gptq, awq, bitsandbytes, hqq, aqlm, eetq, torchao,
     quanto, ...) and any value it does not. ``load_in_4bit`` / ``load_in_8bit`` without a method
-    is bitsandbytes, as transformers reads it. Another FP8 format raises
+    is bitsandbytes, as transformers reads it. A value that is not a mapping (a string,
+    a list, a number) is refused as malformed. ``quant_method`` is matched exactly, as
+    transformers looks it up: ``FP8`` is not ``fp8``. Another FP8 format raises
     :class:`UnsupportedFP8Error`, everything else :class:`UnsupportedQuantizedSourceError`.
     """
     quant = as_quantization_mapping(quantization_config)
     if quant is None:
-        return
+        if quantization_config is None:
+            return
+        # A string, list or number declares SOMETHING; transformers cannot read it either.
+        raise _refuse_source(
+            f"config.json quantization_config is {_brief(quantization_config)}, not a "
+            f"mapping: a malformed declaration no quantiser can be read from"
+        )
     method = _setting(quant.get("quant_method"))
     bnb_bits = (
         4 if quant.get("load_in_4bit") is True
@@ -559,11 +568,35 @@ def _classify_fp8(
     return FP8BlockPlan(block=block, weights=frozenset(weights), scales=frozenset(scales))
 
 
-def read_checkpoint_quantization_config(weights_dir: str) -> Optional[Mapping[str, Any]]:
+def quantization_config_of(config: Any) -> Any:
+    """A model config's ``quantization_config``: its own, else its ``text_config``'s.
+
+    ``config`` is a ``config.json`` mapping or a transformers config object. A multimodal
+    wrapper can carry the declaration on its text sub-config only; the top level wins
+    when both are present, as it does for transformers' own loader. The value is
+    returned as found, so :func:`check_source_quantization` refuses a malformed one.
+    """
+
+    def _get(owner: Any, name: str) -> Any:
+        if isinstance(owner, Mapping):
+            return owner.get(name)
+        return getattr(owner, name, None)
+
+    own = _get(config, "quantization_config")
+    if own is not None:
+        return own
+    # A missing or non-config text_config (None, a string) has no such attribute: None.
+    return _get(_get(config, "text_config"), "quantization_config")
+
+
+def read_checkpoint_quantization_config(weights_dir: str) -> Any:
     """``quantization_config`` from ``config.json`` beside the weights, or ``None``.
 
-    ``None`` when there is no regular, readable, size-bounded ``config.json`` or it has no
-    such mapping: :func:`plan_fp8_block` then refuses an FP8 checkpoint by saying so.
+    ``None`` when there is no regular, readable, size-bounded ``config.json`` or it
+    declares none (at the top level or under ``text_config``,
+    :func:`quantization_config_of`): :func:`plan_fp8_block` then refuses an FP8
+    checkpoint by saying so. A declaration that is not a mapping is returned as it is,
+    for :func:`check_source_quantization` to refuse as malformed.
     """
     path = os.path.join(os.path.realpath(os.path.expanduser(weights_dir)), "config.json")
     if not os.path.isfile(path) or os.path.islink(path):
@@ -575,8 +608,8 @@ def read_checkpoint_quantization_config(weights_dir: str) -> Optional[Mapping[st
             payload = json.load(handle)
     except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
-    quant = payload.get("quantization_config") if isinstance(payload, dict) else None
-    return quant if isinstance(quant, dict) else None
+    # Valid JSON that is not an object (a list, a number) has no such key: None.
+    return quantization_config_of(payload)
 
 
 def dequantize_fp8_block(

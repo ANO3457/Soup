@@ -17,4 +17,7 @@
   affine bundles, and the integer buffers a supported model really has (qwen4_exp's PLE n-gram
   hashing tables, `position_ids`). A pre-flight that met a stored type its header reader has no
   spelling for (U32, U16, F4, ...) now refuses that tensor instead of sizing the cache at a guess.
-  (#PENDING)
+  The sharder checks the source before it creates the cache folder, looks a cache up or
+  quarantines an index, so a refusal leaves an existing cache untouched and a cache an older Soup
+  sharded from such a source is not reused. A `quantization_config` that is not a mapping is
+  refused as malformed, and one under `text_config` is read too. (#PENDING)
