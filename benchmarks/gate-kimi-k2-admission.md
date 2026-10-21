@@ -1,7 +1,8 @@
 # Gate: layer streaming admits Kimi K2 through transformers' own DeepseekV3Config
 
 Status: **G1a fails as registered on transformers' rope_scaling normalisation; G1b, G1c, G2
-and G3 pass** (CPU only; run 2026-10-21). G1a: FAIL, 42 of 43 fields. Sections 1-3 are the rule
+and G3 pass** (CPU only; run 2026-10-21, re-run after the review round in section 7, which
+hardened the guard). G1a: FAIL, 42 of 43 fields. Sections 1-3 are the rule
 as committed in `a236a4e49` before any gate run, unchanged since; sections 4-6 are filled from the
 run. No GPU, no K2 weight download, no K2 or 1T training run.
 
@@ -394,3 +395,119 @@ of the top-k rule). Its test case, `num_experts_per_tok: true`, was refused anyw
 with `norm_topk_prob: false`; the mutation is then caught, and the re-run of it and of the
 `num_experts_per_tok` mutation caught both. Tests added after the mutation run only add assertions
 (the stale key in the layer files, the K2.5 refusal).
+
+## 7. Review round (after the results; the rule in sections 1-3 is unchanged)
+
+An independent review of `9d14ba561` returned CHANGES NEEDED. It found the loader itself safe:
+it reads JSON only, gates on `model_type == "kimi_k2"` exactly, and has two streaming call sites;
+the Moonlight cache fingerprint is unchanged. It then proved holes in the guard with tiny probes:
+
+- **HIGH.** A transformers-5 `rope_parameters` (no `rope_scaling`) carrying `attention_factor` and
+  `truncate` was admitted, and the native config uses both.
+- **HIGH.** `num_key_value_heads` absent was admitted. The native default is 128 against K2's 64
+  heads, so `num_key_value_groups` is 0 and the forward crashes. Section 5's G1b admitted list
+  pinned that case as passing.
+- **MEDIUM.** A top-level `partial_rotary_factor` or `head_dim` was admitted. The native rope reads
+  them, K2 ignores them, and the forward crashes.
+- **MEDIUM.** The tokenizer loaded before the guard ran, so a Kimi-K2-Thinking user was first told
+  to pass `--trust-remote-code` and install `tiktoken`, and only then refused.
+- **Surviving mutants of the review's own:**
+  - the hint test raised a `ValueError` where a missing `tiktoken` really surfaces as an
+    `ImportError`;
+  - `partial_rotary_factor` inside `rope_scaling` was not pinned;
+  - an empty `rope_scaling` had no defined path;
+  - nothing pinned that a failure inside the hint never masks the tokenizer's own error.
+
+### Changes (`cfe1699d6`, then `acad7a66e`)
+
+- **The guard is also an allowlist of top-level keys.** It admits the 45 keys of the published
+  Base / Instruct `config.json` plus three metadata keys, each justified in the code:
+  - `_commit_hash`, which transformers' own reader adds to every dict it returns;
+  - `_name_or_path`;
+  - `dtype`.
+
+  Any other key is refused by name, after the registered rows, with "training.stream_layers admits
+  kimi_k2 only with the published K2 config fields".
+- **The `ep_size` and `rope_interleave` rows are gone.** Neither key is in the published file, so
+  both are now refused whenever present; before, the rows admitted `ep_size <= 1` and
+  `rope_interleave: true`. Their registered refusal cases are still refused, naming the field and
+  its value.
+- **`num_key_value_heads` is required** and must equal `num_attention_heads`.
+- **An empty `rope_scaling` is refused on its own.** K2 indexes `rope_scaling['type']` whenever
+  `rope_scaling` is not null. `null` keeps its defined path: both classes use their plain rope
+  (G1c "no-scaling").
+- **The setup runs the guard before the tokenizer** by loading the model config first.
+- **The loader import moved** (`acad7a66e`). It now sits beside the tokenizer import, because next
+  to the `fp8_block` import it conflicted with `fix/stream-refuse-packed-quant` (tip `454e57113`).
+  `git merge-tree` is clean now. On that merged tree, `test_kimi_k2_streaming` (127),
+  `test_deepseek_v3_streaming` (30), `test_fp8_block_streaming` (157) and
+  `test_stream_refuses_packed_quant` (211) pass.
+
+### G1b cases added after the review (not part of the registered rule)
+
+- **Refused**, each naming exactly its field and value:
+  - `num_key_value_heads` absent, and 32 (which divides 64);
+  - a top-level `rope_parameters` with `attention_factor` / `truncate`;
+  - top-level `partial_rotary_factor` and `head_dim`;
+  - `rope_scaling['partial_rotary_factor']`;
+  - `rope_scaling: {}`;
+  - `ep_size: 1` and `rope_interleave: true`;
+  - `pad_token_id` and `sliding_window`;
+  - outside the 50-case list, the control-bytes test adds a top-level key made of control bytes,
+    which is refused and rendered escaped.
+- **Removed from the admitted list:** `ep_size` 1 and 0, `num_key_value_heads` absent,
+  `rope_interleave: true`, and Thinking without its quantization. The last is now refused naming
+  `ep_size` and `pad_token_id`.
+- **Added to the admitted list:** the three metadata keys.
+
+G1b now has 50 refusal cases and 17 admitted variants. The allowlist is pinned to equal the real
+Base key set.
+
+### Re-run on `acad7a66e`
+
+- **Tests.** `tests/test_kimi_k2_streaming.py`: 127 passed. `test_deepseek_v3_streaming` (30),
+  `test_fp8_block_streaming` (157), `test_issue602_qwen4_ple_streaming` (33, 2 skipped) and
+  `test_terminal_output_hygiene` (31) passed, and ruff is clean. So did the other files that drive
+  the setup: `test_qwen35_streaming`, `test_issue803_*`, `test_stream_moe_lora_targets`,
+  `test_mla_lora_targets`, `test_stream_expert_layout`, `test_stream_disk_preflight_moe` and
+  `test_cli_startup_is_light`.
+- **G1** (gate script on the real files):
+  - G1a is unchanged: FAIL, 42 of 43 fields, `rope_scaling`.
+  - The controls hold, with 0 dynamic-module loads.
+  - Thinking's first failure is still `quantization_config.quant_method='compressed-tensors'`. The
+    allowlist then names 50 more fields of its file: its serialised generation defaults, `ep_size`
+    and `pad_token_id`. Section 5's "its only guard failure" describes the guard before this round.
+- **G2** is unchanged: 4 of 4 cells bit-exact.
+- **G3** is unchanged: G3a holds, and the estimate equals the oracle in both layouts, with the same
+  totals (533,246,633,930 and 2,039,152,160,406 B).
+
+### Mutation re-run
+
+61 mutants were run on the review-round code:
+
+- **46 of section 6's 49, unchanged.** The other 3 target code this round replaced (the `ep_size`
+  row, the `rope_interleave` row, the old `num_key_value_heads` condition).
+- **15 new ones:**
+  - the allowlist: switched off; admitting `ep_size` / `rope_interleave`; admitting
+    `rope_parameters` / `partial_rotary_factor` / `head_dim`; dropping `_commit_hash`; one extra
+    metadata key; raw key names in the message; the reason text;
+  - `num_key_value_heads`: absent admitted; any integer admitted;
+  - `rope_scaling`: the empty-dict branch off; a falsy `rope_scaling` admitted; `partial_rotary_factor`
+    added to the rope keys;
+  - the setup's `except` narrowed to `ValueError`; the hint's own `except` narrowed;
+  - the guard moved back after the tokenizer.
+
+**All 61 caught.** Three of them (`hint-print`, `setup-hint-call`, `setup-reraise`) failed their
+tests on the first pass, but the driver still named the test id from before it was parametrised.
+With the ids corrected they were re-run and caught. After the import move, the five `stream_setup.py`
+mutants were run again on `acad7a66e`: 5 of 5 caught. Each file was restored byte for byte, with its
+sha256 checked.
+
+### Correction: "does not import on transformers 5.17"
+
+Sections 2 and 3 say K2's own code "does not import on transformers 5.17", quoting the
+investigation. That was not observed here: K2's code was never run. It is an inference from
+reading the code. Line 56 of `modeling_deepseek.py` imports `is_torch_fx_available` from
+`transformers.utils.import_utils`, and transformers 5.17.0 does not define that name (checked by
+`hasattr` and in its source); every other name the file imports from transformers exists. The docs
+now state it this way.
