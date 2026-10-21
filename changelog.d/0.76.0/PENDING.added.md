@@ -10,9 +10,12 @@
   K2 reads, and unquantised or DeepSeek-V3 block FP8 weights. A config that fails any of them is
   refused before any weight is resolved, naming every such field and its value; Kimi-K2-Thinking
   (compressed-tensors INT4) is refused as `quantization_config.quant_method='compressed-tensors'`.
-  A tiny K2-like checkpoint (the published config with tiny dimensions) streams bit for bit like a
-  resident `DeepseekV3ForCausalLM` on the same weights (logits, loss, LoRA gradients; `fused` and
-  `per_expert`; bf16 and FP8 block), and the disk pre-flight sizes the published Base layout exactly:
+  In the gate (`benchmarks/gate-kimi-k2-admission.md`) the field-by-field config check fails as
+  registered on one field: transformers adds `rope_theta` and `rope_type` to `rope_scaling`, as it
+  does for any DeepSeek-V3 config. The other checks pass. A tiny K2-like checkpoint (the published
+  config with tiny dimensions) streams bit for bit like a resident `DeepseekV3ForCausalLM` on the
+  same weights (logits, loss, LoRA gradients; `fused` and `per_expert`; bf16 and FP8 block), and the
+  disk pre-flight sizes the published Base layout exactly:
   533.2 GB per_expert and 2.04 TB fused under `quantization: 4bit`
   (`benchmarks/gate-kimi-k2-admission.md`; CPU only, no K2 weights downloaded, nothing trained on
   K2). K2's tokenizer is repository code: it needs `--trust-remote-code`, which reaches the tokenizer

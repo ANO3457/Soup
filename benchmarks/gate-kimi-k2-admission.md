@@ -1,10 +1,9 @@
 # Gate: layer streaming admits Kimi K2 through transformers' own DeepseekV3Config
 
-Status: **G1a FAIL as written on 1 of 43 fields (explained in section 5: transformers adds two
-keys to `rope_scaling`, no K2 value is lost), G1b PASS, G1c PASS, G2 PASS, G3 PASS** (CPU only;
-run 2026-10-21). Sections 1-3 are the rule as committed in `a236a4e49` before any gate run,
-unchanged since; sections 4-6 are filled from the run. No GPU, no K2 weight download, no K2 or 1T
-training run.
+Status: **G1a fails as registered on transformers' rope_scaling normalisation; G1b, G1c, G2
+and G3 pass** (CPU only; run 2026-10-21). G1a: FAIL, 42 of 43 fields. Sections 1-3 are the rule
+as committed in `a236a4e49` before any gate run, unchanged since; sections 4-6 are filled from the
+run. No GPU, no K2 weight download, no K2 or 1T training run.
 
 ## 1. Question
 
@@ -242,21 +241,15 @@ is altered in the source, a named test must fail, and the file is restored byte 
 
 ## 5. Results
 
-### G1, config: G1a FAIL as written on 1 of 43 fields (explained, no K2 value lost); G1b PASS; G1c PASS
+### G1, config: G1a FAIL; G1b PASS; G1c PASS
 
-**G1a.** On the real Base and Instruct files (byte-identical, sha256 `8c13ae10...7439`; the test
-file's `K2_BASE_CONFIG` equals the real Base dict), Soup's loader returns a `DeepseekV3Config` with
-`model_type` `deepseek_v3` and no `auto_map`. Of the 43 raw keys compared, 42 hold the same value
-under the rule (with the two named normalisations, `rope_theta` and `torch_dtype`). The 43rd,
-`rope_scaling`, does not compare equal: transformers' rope standardisation adds two keys to the
-dict it is handed, `rope_theta: 50000.0` and `rope_type: "yarn"`. Each of K2's seven
-`rope_scaling` keys keeps its value, `rope_parameters` holds all of them plus those two, and
-`AutoConfig` adds the same two keys to the same file spelled `deepseek_v3` (checked directly). The
-rule named only two normalisations, so G1a is a FAIL as written; the difference is transformers'
-own, made for every DeepSeek-V3 config, and no K2 value is lost or changed. The exploratory probe
-before the rule missed it because it handed transformers a shallow copy, so the raw dict it then
-compared against had received the same two keys. `tests/test_kimi_k2_streaming.py` pins the
-observed behaviour exactly (the seven values equal, the two additions named).
+**G1a: FAIL, 42 of 43 fields.** On the real Base and Instruct files (byte-identical, sha256
+`8c13ae10...7439`; the test file's `K2_BASE_CONFIG` equals the real Base dict), Soup's loader
+returns a `DeepseekV3Config` with `model_type` `deepseek_v3` and no `auto_map`. Of the 43 raw keys
+compared, 42 hold the same value under the rule, with its two named normalisations (`rope_theta`
+and `torch_dtype`). The 43rd, `rope_scaling`, does not compare equal: transformers adds two keys to
+it, `rope_theta: 50000.0` and `rope_type: "yarn"`. The rule admits no other normalisation, so G1a
+fails as registered. The verdict stands; the rule is not amended.
 
 Controls, all held, on both files:
 - today's failure: `AutoConfig.from_pretrained(trust_remote_code=False)` raises `ValueError: The
@@ -268,6 +261,23 @@ Controls, all held, on both files:
 
 Reported: no Python warning and no `transformers` log record at WARNING or above during either
 load.
+
+#### G1a: analysis done after the verdict (not part of the registered rule)
+
+- **The same additions on a native config.** `AutoConfig.from_pretrained` on the real Base dict
+  spelled `deepseek_v3` without `auto_map` gives a `DeepseekV3Config` whose `rope_scaling` holds K2's
+  seven keys plus the same two, `rope_theta: 50000.0` and `rope_type: "yarn"`. They come from
+  transformers' rope standardisation, which writes into the `rope_scaling` dict it is handed, for any
+  DeepSeek-V3 config.
+- **Nothing K2 declares is lost or changed.** Each of K2's seven `rope_scaling` keys keeps its
+  value, and `rope_parameters` holds all of them plus those two.
+- **Why the rule missed it.** The exploratory probe before the rule handed transformers a shallow
+  copy, so the raw dict it then compared against had received the same two keys.
+- **Why it does not block admission.** G2 compares what the config computes. The streamed model,
+  built from the `kimi_k2` folder through this loader, is bit-exact against a resident model whose
+  config was built independently in the native spelling, with the same yarn rope, in every cell.
+- `tests/test_kimi_k2_streaming.py` pins the observed behaviour exactly: the seven values equal,
+  the two additions named.
 
 **G1b.** Unmodified Base and Instruct pass. 39 refusal cases on the real Base dict (every row of the
 table, each `rope_scaling` condition, absent spellings, non-int and non-mapping spellings) are each
