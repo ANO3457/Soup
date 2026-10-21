@@ -9,8 +9,8 @@ clean:
 * `-n logical` with the plugin's `psutil` extra installed, which is what counts the CPUs;
 * nothing in `pyproject.toml` turns workers on, so a local `pytest tests/` stays serial.
 
-pyproject is read with regular expressions, not ``tomllib``, which is 3.11+ while this
-repository supports 3.10: the convention of ``tests/test_requires_python_bound.py``.
+pyproject is read with regular expressions, not ``tomllib``: the convention of
+``tests/test_requires_python_bound.py``, set while the floor was 3.10, which has no ``tomllib``.
 """
 
 from __future__ import annotations

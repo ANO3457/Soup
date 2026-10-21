@@ -139,9 +139,8 @@ that will refuse them. A config that loaded before can stop loading: run
 - **Deprecated:** `soup export --format awq` and `--format gptq` will be removed in v0.77; both
   upstream projects are archived and neither extra installs next to `[train]`.
 
-> From v0.77, Python **3.11–3.13** only. Python 3.10 reached end of life on 2026-10-01, and
-> pip on 3.10 keeps installing v0.76. On 3.14+, pip falls back to v0.72.4, the last release
-> without an upper bound, and resolves untested PyTorch wheels there.
+> From v0.77, Python **3.11–3.13** only: 3.10 reached end of life on 2026-10-01 (pip there stays
+> on v0.76); on 3.14+, pip falls back to v0.72.4 (no upper bound) and untested PyTorch wheels.
 
 Older highlights live on the [GitHub Releases](https://github.com/MakazhanAlpamys/Soup/releases) page.
 
