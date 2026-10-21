@@ -79,6 +79,7 @@ GATED_JOBS = (
     "transformers-floor",
     "core-floor",
 )
+NIGHTLY_JOBS = ("typer-vendored",)
 #: The two gated jobs that are not required checks and never fail the build: they run in the
 #: nightly, manual and release runs but not on a pull request, approval run included
 #: (2026-10-19: 206 pull-request runs in 7 days, 480 job-minutes, for a signal that is not a
@@ -694,8 +695,19 @@ class TestGatedJobs:
         assert "needs" not in lint
 
     def test_every_job_is_classified(self):
-        """A new job must be declared quick or full here, or it lands on every PR push."""
-        assert sorted(_jobs()) == sorted(["plan", "lint", "test", *GATED_JOBS])
+        """Classify quick, approval and nightly jobs so none lands on every PR push."""
+        assert sorted(_jobs()) == sorted(["plan", "lint", "test", *GATED_JOBS, *NIGHTLY_JOBS])
+
+    @pytest.mark.parametrize(("context", "kind"), EVENTS)
+    def test_vendored_lane_runs_only_on_nightly_and_manual(self, context, kind):
+        job = _jobs()["typer-vendored"]
+        assert "plan" in _needs(job)
+        context = {
+            **context,
+            "needs": {"plan": {"outputs": {"full": "false" if kind == "QUICK" else "true"}}},
+        }
+        # FULL is schedule/dispatch; APPROVAL and RELEASE must not add this job.
+        assert _runs("typer-vendored", context) == (kind == "FULL")
 
 
 class TestMatrix:
@@ -1093,7 +1105,7 @@ class TestPinnedUpstream:
         """A new job that installs `.[dev]` on its own resolves the newest release on
         every pull request, which is the failure this switch removed."""
         installing = {name for name, job in _jobs().items() if _project_installs(job)}
-        assert installing == {*SWITCHED_JOBS, FLOOR_JOB, "core-floor"}
+        assert installing == {*SWITCHED_JOBS, FLOOR_JOB, "core-floor", "typer-vendored"}
 
     def test_no_environment_variable_constrains_a_job_behind_its_command_line(self):
         """`PIP_CONSTRAINT` in an `env:` applies to every pip of that job on every run,
@@ -1152,6 +1164,8 @@ UNPINNED_ON_PURPOSE = {
     # CORE: the project with no extra, so no torch and no transformers to pin.
     # Its separate core-floor constraints are checked by test_core_dependency_floors.py.
     (CI.name, "core-floor"): CORE,
+    # Dedicated core-only lane with exact Typer/Click pins, asserted at runtime.
+    (CI.name, "typer-vendored"): CORE,
     ("codspeed.yml", "benchmark"): CORE,
     # NEWEST: started by a schedule or by hand, never by a pull request or a push, and
     # there to meet the newest release.
