@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import os
 import sys
 
@@ -154,14 +156,131 @@ def test_production_capability_gate_keeps_cpu_on_the_old_path():
     assert _can_use_checkpoint_visible_nf4_gemm(torch.randn(2, 16), state) is False
 
 
-def test_bitsandbytes_private_dispatch_contract_is_visible_to_cpu_ci():
-    try:
-        from bitsandbytes.backends.cuda import ops as bnb_cuda_ops
-    except (ImportError, AttributeError) as exc:
-        pytest.skip(f"bitsandbytes CUDA ops cannot import with this torch build: {exc}")
+_BNB_DISPATCH_NAMES = ("_gemm_4bit_use_custom_fn", "_gemm_4bit_custom_max_m")
 
-    assert hasattr(bnb_cuda_ops, "_gemm_4bit_use_custom_fn")
-    assert hasattr(bnb_cuda_ops, "_gemm_4bit_custom_max_m")
+
+def _module_level_names(source):
+    """Names a module source binds at its top level (Assign / AnnAssign / def / class).
+
+    Walks into top-level ``if`` / ``try`` / ``with`` blocks, because bitsandbytes binds
+    the dispatch names under ``if torch.version.hip is None:`` / ``else:``. Function and
+    class bodies are not entered: a local variable is not a module attribute.
+    """
+    bound = set()
+
+    def add_target(target):
+        if isinstance(target, ast.Name):
+            bound.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                add_target(element)
+        elif isinstance(target, ast.Starred):
+            add_target(target.value)
+
+    def visit(statements):
+        for node in statements:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    add_target(target)
+            elif isinstance(node, ast.AnnAssign):
+                if node.value is not None:
+                    add_target(node.target)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, ast.If):
+                visit(node.body)
+                visit(node.orelse)
+            elif isinstance(node, (ast.Try, ast.TryStar)):
+                visit(node.body)
+                for handler in node.handlers:
+                    visit(handler.body)
+                visit(node.orelse)
+                visit(node.finalbody)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                visit(node.body)
+
+    visit(ast.parse(source).body)
+    return bound
+
+
+def _missing_module_level_names(source, names):
+    """The entries of ``names`` that ``source`` does not bind at module level."""
+    bound = _module_level_names(source)
+    return [name for name in names if name not in bound]
+
+
+def test_bitsandbytes_private_dispatch_contract_is_visible_to_cpu_ci():
+    # Read the source instead of importing ``bitsandbytes.backends.cuda.ops``: that module
+    # reads ``torch._C._cuda_getCurrentRawStream`` at import (bitsandbytes 0.50.2,
+    # ops.py:69), which a CPU-only torch wheel does not have, so an import would skip
+    # this canary on every CPU-wheel CI cell.
+    spec = importlib.util.find_spec("bitsandbytes")
+    if spec is None or not spec.submodule_search_locations:
+        pytest.skip("bitsandbytes is not installed")
+    locations = list(spec.submodule_search_locations)
+    candidates = [os.path.join(root, "backends", "cuda", "ops.py") for root in locations]
+    ops_path = next((path for path in candidates if os.path.isfile(path)), None)
+    if ops_path is None:
+        pytest.skip(f"backends/cuda/ops.py not found under bitsandbytes at {locations}")
+
+    with open(ops_path, encoding="utf-8") as handle:
+        source = handle.read()
+
+    missing = _missing_module_level_names(source, _BNB_DISPATCH_NAMES)
+    assert not missing, (
+        f"bitsandbytes {ops_path} no longer binds {missing} at module level; "
+        "layer_stream_runtime._can_use_checkpoint_visible_nf4_gemm reads them"
+    )
+
+
+_SAMPLE_NAMES = ("_gemm_4bit_use_custom_fn", "_gemm_4bit_custom_max_m")
+
+
+def test_dispatch_name_check_accepts_names_bound_the_way_bitsandbytes_binds_them():
+    source = (
+        "import torch\n"
+        "if torch.version.hip is None:\n"
+        "    _gemm_4bit_use_custom_fn = _custom_cuda\n"
+        "    _gemm_4bit_custom_max_m: int = 1536\n"
+        "else:\n"
+        "    _gemm_4bit_use_custom_fn = _custom_rocm\n"
+        "    _gemm_4bit_custom_max_m = 256\n"
+    )
+    assert _missing_module_level_names(source, _SAMPLE_NAMES) == []
+    defined = "def _gemm_4bit_use_custom_fn():\n    pass\n_gemm_4bit_custom_max_m = 1\n"
+    assert _missing_module_level_names(defined, _SAMPLE_NAMES) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_missing"),
+    [
+        ("_gemm_4bit_use_custom_fn = 1\n", ["_gemm_4bit_custom_max_m"]),
+        ("_gemm_4bit_custom_max_m = 1\n", ["_gemm_4bit_use_custom_fn"]),
+        ("", ["_gemm_4bit_use_custom_fn", "_gemm_4bit_custom_max_m"]),
+        (
+            "def helper():\n    _gemm_4bit_use_custom_fn = 1\n    _gemm_4bit_custom_max_m = 2\n",
+            ["_gemm_4bit_use_custom_fn", "_gemm_4bit_custom_max_m"],
+        ),
+        (
+            "_gemm_4bit_use_custom_fn: int\n_gemm_4bit_custom_max_m = 1\n",
+            ["_gemm_4bit_use_custom_fn"],
+        ),
+        (
+            "# _gemm_4bit_use_custom_fn = 1\n_gemm_4bit_custom_max_m = 1\n",
+            ["_gemm_4bit_use_custom_fn"],
+        ),
+    ],
+    ids=[
+        "missing-max-m",
+        "missing-use-custom-fn",
+        "empty-module",
+        "bound-only-inside-a-function",
+        "annotation-without-value",
+        "mentioned-only-in-a-comment",
+    ],
+)
+def test_dispatch_name_check_reports_the_name_that_is_missing(source, expected_missing):
+    assert _missing_module_level_names(source, _SAMPLE_NAMES) == expected_missing
 
 
 @pytest.mark.parametrize(
