@@ -13,9 +13,9 @@ cd Soup
 
 ### 2. Set Up Development Environment
 
-**Requirements:** Python 3.10, 3.11 or 3.12 (`requires-python = ">=3.10,<3.13"`). CI runs
-exactly those three; `tests/test_requires_python_bound.py` derives the declared bound from
-the CI matrix, so widening one without the other fails the suite.
+**Requirements:** Python 3.11, 3.12 or 3.13 (`requires-python = ">=3.11,<3.14"`; 3.10 was
+dropped in #1805). CI runs exactly those three; `tests/test_requires_python_bound.py` derives
+the declared bound from the CI matrix, so widening one without the other fails the suite.
 
 Work inside a virtualenv, then install the project in editable mode with dev
 dependencies:
@@ -583,7 +583,7 @@ Great areas for first contributions:
 
 GitHub Actions runs on every push and PR:
 - **ruff** linting on Python 3.11 (must pass)
-- **pytest** on Python 3.10, 3.11, 3.12 across Ubuntu, Windows, macOS (must pass)
+- **pytest** on Python 3.11, 3.12, 3.13 across Ubuntu, Windows, macOS (must pass)
 - **transformers-floor** on Ubuntu / Python 3.11 (#478): installs
   `.[dev]` under `.github/constraints/transformers-floor.txt`, asserts the
   pinned `transformers` version, and runs the static `dtype=` / `torch_dtype=`
@@ -603,14 +603,16 @@ GitHub Actions runs on every push and PR:
 
 **Pull requests run a quick subset first.** A push to a pull request runs `lint`
 and the tests on Ubuntu / Python 3.12 only. The required cells (Ubuntu on Python
-3.10 and 3.12, Windows and macOS on 3.12, plus the smoke jobs) run when a
+3.11 and 3.12, Windows and macOS on 3.12, plus the smoke jobs) run when a
 maintainer adds the `ci:full` label at approval, and on every later push while
 the label stays. Until then the other `test (...)` checks show as *Expected* and
 the smoke jobs as *skipped*; neither is a failure on your side. A PR is merged
 only when those checks are green on its current head. After the merge, `main`
 runs the same quick set on every commit and the full matrix (every Python from
-3.10 to 3.12, with 3.11 on Ubuntu only) once a night; a push to a `release/**`
-branch runs every cell.
+3.11 to 3.13, with 3.11 on Ubuntu only) once a night; a push to a `release/**`
+branch runs every cell. Python 3.13 runs in the nightly and release runs only, not
+on a pull request, so a failure that exists only there shows on `main` in the
+next nightly run.
 
 **A draft pull request runs no CI.** Nothing starts while a pull request is a
 draft, whatever is pushed to it. Mark it ready for review and the quick set
