@@ -705,10 +705,10 @@ _BASE_REVISION = "ce72df012259dcc55d945e890f815fe7ef69159c"
 
 @pytest.mark.parametrize("layout", ["hub-snapshot", "plain-folder"])
 def test_the_loader_admits_the_metadata_transformers_reader_adds(tmp_path, layout):
-    """transformers' reader adds ``_commit_hash`` to the dict: on 5.17 to every dict (None for a
-    plain folder), on 5.19 not for a plain folder (CI run 39626025729), so presence is not
-    asserted for one. A Hub download resolves into the cache's ``snapshots/<commit>/``
-    folder, where the reader records that commit; the loader admits it and keeps it."""
+    """transformers' reader adds ``_commit_hash`` to the dict on 5.17 (None for a plain folder,
+    the commit for a Hub cache's ``snapshots/<commit>/`` folder) and not at all on 5.19 (CI runs
+    39626025729, 39758361029), where the config has no ``_commit_hash`` attribute either. So
+    presence is asserted for neither: whatever the reader records, the loader admits and keeps."""
     pytest.importorskip("transformers")
     from transformers import PretrainedConfig
 
@@ -723,8 +723,9 @@ def test_the_loader_admits_the_metadata_transformers_reader_adds(tmp_path, layou
     assert set(read) - set(K2_BASE_CONFIG) <= _METADATA_KEYS
     config = load_stream_model_config(folder)
     assert config.model_type == "deepseek_v3"
-    # Whatever commit the reader recorded survives the rewrite (the snapshot's, on 5.17).
-    assert config._commit_hash == read.get("_commit_hash")
+    # Whatever commit the reader recorded survives the rewrite (the snapshot's, on 5.17); on
+    # 5.19 neither the dict nor the config carries one.
+    assert getattr(config, "_commit_hash", None) == read.get("_commit_hash")
 
 
 @pytest.mark.parametrize("changes", [case[1] for case in _ADMITTED], ids=[c[0] for c in _ADMITTED])
@@ -1655,8 +1656,15 @@ def test_the_streamed_tokenizer_load_never_imports_the_repositorys_config_code(
         "base_revision_kwargs": base_revision_kwargs,
     }
     assert not sentinel.exists()  # the config loader ran no repository code
-    tokenizer = eval(compile(ast.Expression(body=calls[0]), "<stream tokenizer>", "eval"), env)
+    expression = compile(ast.Expression(body=calls[0]), "<stream tokenizer>", "eval")
+    # A load that imported the module may then fail on its stand-in class: the sentinel is
+    # checked first, so the failure is this test's own, not the stand-in's AttributeError.
+    try:
+        tokenizer, load_error = eval(expression, env), None
+    except Exception as error:  # noqa: BLE001 -- reported below, after the sentinel check
+        tokenizer, load_error = None, error
     assert not sentinel.exists(), "the tokenizer load imported configuration_deepseek.py"
+    assert load_error is None, repr(load_error)
     assert tokenizer("hello world")["input_ids"][-2:] == [3, 4]
 
 

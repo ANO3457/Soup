@@ -68,8 +68,8 @@ _PUBLISHED_KEYS = frozenset(
 #: Keys outside the published file, admitted because neither class computes with them.
 _METADATA_KEYS = frozenset(
     {
-        # Added by transformers' own reader (``get_config_dict``): on 5.17 to every dict it
-        # returns, on 5.19 not for a plain local folder; a Hub snapshot carries its commit.
+        # Added by transformers' own reader (``get_config_dict``) on 5.17, to every dict it
+        # returns (a Hub snapshot's commit, or None); 5.19 adds it to none.
         # ``PreTrainedConfig`` pops it as the Hub revision of the file, not a model setting.
         "_commit_hash",
         # Written by ``save_pretrained`` as the source path: a provenance stamp only.

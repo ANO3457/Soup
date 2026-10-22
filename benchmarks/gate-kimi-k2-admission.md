@@ -550,9 +550,11 @@ of `origin/main` (with #2094, which pins `build_meta_skeleton`'s config read to 
   `stream_setup.py`, and the read had moved into the loader. The contract now runs the setup's own
   `load_stream_model_config(...)` call through the real loader, with strict receivers on both of
   its reads (`AutoConfig`, and the raw `config.json` read of a K2 file).
-- **CI, `_commit_hash`.** CI installs transformers 5.19.0, whose reader adds no `_commit_hash` for a
-  plain local folder (5.17 adds `None`). The test now runs on a Hub-snapshot-shaped folder too and
-  asserts only what holds on both versions.
+- **CI, `_commit_hash`.** CI installs transformers 5.19.0, whose reader adds no `_commit_hash` at
+  all, not even for a Hub snapshot folder (5.17 adds `None` for a plain folder and the commit for a
+  snapshot), and whose config then has no `_commit_hash` attribute. The test runs on both folder
+  shapes and asserts only what holds on both versions: the config keeps whatever the reader
+  recorded, or nothing.
 - **CI, Linux.** The NF4 suffix fixture built the full-size skeleton, and transformers allocates
   each MoE layer's fused experts on the CPU before they move to meta: 22,548,578,304 B at once,
   refused on a 16 GB runner. The probe now runs on a size twin of the published config (only size
