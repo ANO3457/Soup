@@ -1534,19 +1534,23 @@ class StreamingSetupMixin:
                 # not started yet, so release the runtime here.
                 self._close_stream_runtime()
                 raise
-        # Before the probe, so that 'off' is what it measures.
-        try:
-            self._configure_stream_recompute(
-                model,
-                tcfg,
-                tier=tier,
-                on_cuda=on_cuda,
-                task=cfg.task,
-                step_shape=self._stream_step_shape(cfg, tcfg, model_config),
-            )
-        except Exception:
-            self._close_stream_runtime()
-            raise
+        # training.stream_recompute -- before the probe, so that the probe
+        # measures the mode that will train. The default ('on') adds nothing to
+        # the setup: no attribute is read and nothing is called, so the shape
+        # and task arguments below are only evaluated for 'off' / 'auto'.
+        if getattr(tcfg, "stream_recompute", "on") != "on":
+            try:
+                self._configure_stream_recompute(
+                    model,
+                    tcfg,
+                    tier=tier,
+                    on_cuda=on_cuda,
+                    task=cfg.task,
+                    step_shape=self._stream_step_shape(cfg, tcfg, model_config),
+                )
+            except Exception:
+                self._close_stream_runtime()
+                raise
         if probe_plan is not None:
             self._run_stream_vram_probe(model, probe_plan)
         stats = runtime.stats()

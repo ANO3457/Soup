@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -1283,3 +1284,110 @@ class TestTheProbeHarness:
         shipped = _step(model, ids)
         set_stream_recompute(model, False)
         _assert_same(shipped, _step(model, ids))
+
+
+class TestTheDefaultPathAddsNothing:
+    """With ``stream_recompute`` 'on' (or a stand-in config that never heard of
+    it) the setup must not read anything the feature added, call anything, or
+    reach for a runtime method. Regression: the setup evaluated ``cfg.task`` and
+    the step shape for every mode, so a stub config without ``task`` raised and
+    the cleanup then called ``close()`` on a stub runtime that has none (#2152,
+    test_issue803 / test_qwen35_streaming on CI)."""
+
+    @pytest.mark.parametrize("spelled", [False, True])
+    def test_a_minimal_stub_setup_makes_no_new_calls(self, monkeypatch, tmp_path, spelled):
+        import soup_cli.utils.layer_stream_runtime as rt
+        from soup_cli.trainer.stream_setup import StreamingSetupMixin
+        from soup_cli.utils.layer_stream import DEFAULT_STREAM_READ_AHEAD
+        from tests.test_issue803_lora_patterns_all_trainers import _config, _tokenizer
+
+        def never(name):
+            def refuse(*_a, **_k):
+                raise AssertionError(f"{name} was reached on the default path")
+
+            return refuse
+
+        class _Wrapper(StreamingSetupMixin):
+            def __init__(self):
+                self.device = "cpu"
+                self._trust_remote_code = False
+
+            def _stream_budget_lines(self, *_args, **_kwargs):
+                return (), None
+
+        for name in ("_configure_stream_recompute", "_stream_step_shape"):
+            monkeypatch.setattr(StreamingSetupMixin, name, never(name))
+        for name in ("set_stream_recompute", "plan_stream_recompute_auto"):
+            monkeypatch.setattr(rt, name, never(name))
+
+        extra = {"stream_recompute": "on"} if spelled else {}
+        tcfg = SimpleNamespace(
+            quantization="none",
+            double_quant_on=True,
+            stream_source="auto",
+            stream_buffers=2,
+            stream_disk_kind=None,
+            stream_pin=None,
+            seed=7,
+            moe_lora=False,
+            batch_size=1,
+            gradient_accumulation_steps=1,
+            stream_vram_probe=False,
+            stream_vram_override=None,
+            stream_read_ahead=DEFAULT_STREAM_READ_AHEAD,
+            lora=_config("sft").training.lora,
+            **extra,
+        )
+        # No `task`, no `data.max_length`: nothing on the default path may need them.
+        cfg = SimpleNamespace(base="Qwen/Qwen3-0.6B", data=SimpleNamespace())
+        model_cfg = SimpleNamespace(
+            model_type="qwen3", hidden_size=64, num_hidden_layers=2, vocab_size=128
+        )
+        # Only `stats`: no `close`, so any cleanup call would raise here.
+        runtime = SimpleNamespace(
+            stats=lambda: {
+                "tier": "ram",
+                "store_bytes": 0,
+                "pinned": False,
+                "n_layers": 2,
+                "buffers": 2,
+                "buffer_bytes": 8,
+            }
+        )
+        built = SimpleNamespace()
+        fakes = {
+            "transformers.AutoTokenizer.from_pretrained": lambda *_a, **_k: _tokenizer(),
+            "transformers.AutoConfig.from_pretrained": lambda *_a, **_k: model_cfg,
+            "soup_cli.utils.layer_shard.resolve_shard_dir": lambda *_a, **_k: str(tmp_path / "s"),
+            "soup_cli.utils.layer_shard.shard_checkpoint": lambda *_a, **_k: SimpleNamespace(
+                n_layers=2, total_params=100, quant="none", quant_specs={}
+            ),
+            "soup_cli.utils.layer_shard.source_weight_bytes": lambda *_a, **_k: 1024,
+            "soup_cli.utils.spectrum_scan.resolve_model_weights": (
+                lambda *_a, **_k: str(tmp_path / "w")
+            ),
+            "soup_cli.utils.layer_stream.free_ram_bytes": lambda: 1_000_000,
+            "soup_cli.utils.layer_stream_runtime.build_meta_skeleton": (
+                lambda *_a, **_k: SimpleNamespace()
+            ),
+            "soup_cli.utils.layer_stream_runtime.RamSource.layer_specs_from_paths": (
+                lambda *_a, **_k: [
+                    {"self_attn.q_proj.weight": ((4, 4), "float32")},
+                    {"self_attn.q_proj.weight": ((4, 4), "float32")},
+                ]
+            ),
+            "soup_cli.utils.layer_stream_runtime.extras_resident_bytes": lambda *_a, **_k: 0,
+            "soup_cli.utils.layer_stream_runtime.build_streamed_model": (
+                lambda **_k: (built, runtime)
+            ),
+            "soup_cli.utils.moe.detect_moe_model": lambda *_a, **_k: False,
+            "soup_cli.utils.layer_stream.render_stream_panel": lambda *_a, **_k: "panel",
+            "soup_cli.utils.layer_stream_runtime.expandable_segments_status": lambda: (True, ""),
+        }
+        for target, fake in fakes.items():
+            monkeypatch.setattr(target, fake)
+
+        wrapper = _Wrapper()
+        wrapper._setup_streaming_transformers(cfg, tcfg)
+        assert wrapper.model is built
+        assert wrapper._stream_runtime is runtime
