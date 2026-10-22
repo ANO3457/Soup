@@ -960,8 +960,13 @@ class StreamingSetupMixin:
 
         console.print(f"[dim]Loading tokenizer: {cfg.base}[/]")
         try:
+            # config=: without it AutoTokenizer reads the config again, with the user's
+            # trust_remote_code, and for a repository with an auto_map (Kimi K2, Moonlight)
+            # imports and runs its configuration module (second review of #2107). The
+            # native config is what the tokenizer is resolved against; the flag still
+            # reaches the tokenizer's own code (K2's tokenization_kimi.py).
             self.tokenizer = AutoTokenizer.from_pretrained(
-                cfg.base, trust_remote_code=self._trust_remote_code,
+                cfg.base, config=model_config, trust_remote_code=self._trust_remote_code,
                 **base_revision_kwargs(cfg.base),
             )
         except Exception:

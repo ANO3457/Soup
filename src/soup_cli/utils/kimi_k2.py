@@ -433,7 +433,7 @@ def kimi_k2_tokenizer_hint(model_id: str, **kwargs: Any) -> Optional[str]:
     hint = (
         "Kimi K2's tokenizer exists only as code in its repository (tokenization_kimi.py), so "
         "it needs --trust-remote-code. Under layer streaming that flag reaches the tokenizer "
-        "only: the model is still built from transformers' own DeepseekV3 class, never from "
+        "only: the config and the model are still transformers' own DeepseekV3 classes, never "
         "the repository's code."
     )
     if not _tiktoken_available():

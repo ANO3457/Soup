@@ -1430,6 +1430,82 @@ def test_trust_remote_code_reaches_the_tokenizer_but_never_the_streamed_config(
     )
     assert [kwargs["trust_remote_code"] for kwargs in seen] == [False]
     assert [call["trust_remote_code"] for call in calls["tokenizer"]] == [True]
+    # Second review (MEDIUM 2): the tokenizer is handed the native config, so AutoTokenizer
+    # does not read the config again with the user's flag.
+    assert [call["config"] for call in calls["tokenizer"]] == [model_cfg]
+
+
+def _sentinel_k2_repository(root, sentinel):
+    """A local K2 base: the published config.json (its auto_map onto configuration_deepseek),
+    a ``configuration_deepseek.py`` that writes ``sentinel`` when imported, and a tiny native
+    fast tokenizer (no tokenizer code in the folder)."""
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    folder = root / "kimi-k2-local"
+    _write_config(folder, K2_BASE_CONFIG)
+    (folder / "configuration_deepseek.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(sentinel)!r}).write_text('imported', encoding='utf-8')\n"
+        "from transformers import PretrainedConfig\n\n\n"
+        "class DeepseekV3Config(PretrainedConfig):\n"
+        "    model_type = 'kimi_k2'\n",
+        encoding="utf-8",
+    )
+    vocab = {"<unk>": 0, "<s>": 1, "</s>": 2, "hello": 3, "world": 4}
+    tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer.save(str(folder / "tokenizer.json"))
+    (folder / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<s>", "eos_token": "</s>",
+        "unk_token": "<unk>",
+    }), encoding="utf-8")
+    return str(folder)
+
+
+def test_the_streamed_tokenizer_load_never_imports_the_repositorys_config_code(
+    tmp_path, monkeypatch
+):
+    """Second review (MEDIUM 2), with the real AutoTokenizer: the setup's own tokenizer call,
+    with --trust-remote-code, must not import the repository's configuration module. Without
+    ``config=`` AutoTokenizer calls AutoConfig with the user's flag first, which follows the
+    auto_map and runs the module (traced on transformers 5.17; this test fails then)."""
+    pytest.importorskip("transformers")
+    pytest.importorskip("tokenizers")
+    import ast
+    import sys
+
+    import transformers
+    import transformers.dynamic_module_utils as dynamic
+
+    from soup_cli.utils.kimi_k2 import load_stream_model_config
+    from soup_cli.utils.run_provenance import base_revision_kwargs
+
+    sentinel = tmp_path / "configuration_deepseek-was-imported"
+    folder = _sentinel_k2_repository(tmp_path, sentinel)
+    # Should the module be imported after all, its copy lands in tmp_path, not the user cache.
+    monkeypatch.setattr(dynamic, "HF_MODULES_CACHE", str(tmp_path / "hf-modules"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    source_path = os.path.join(
+        os.path.dirname(__file__), os.pardir, "src", "soup_cli", "trainer", "stream_setup.py"
+    )
+    with open(source_path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Name) and node.func.value.id == "AutoTokenizer"
+             and node.func.attr == "from_pretrained"]
+    assert len(calls) == 1
+    env = {
+        "cfg": SimpleNamespace(base=folder),
+        "self": SimpleNamespace(_trust_remote_code=True),
+        "AutoTokenizer": transformers.AutoTokenizer,
+        "model_config": load_stream_model_config(folder, trust_remote_code=False),
+        "base_revision_kwargs": base_revision_kwargs,
+    }
+    assert not sentinel.exists()  # the config loader ran no repository code
+    tokenizer = eval(compile(ast.Expression(body=calls[0]), "<stream tokenizer>", "eval"), env)
+    assert not sentinel.exists(), "the tokenizer load imported configuration_deepseek.py"
+    assert tokenizer("hello world")["input_ids"][-2:] == [3, 4]
 
 
 def test_the_setup_refuses_a_guard_failure_before_resolving_any_weight(tmp_path, monkeypatch):
