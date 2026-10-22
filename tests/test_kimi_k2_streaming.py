@@ -595,15 +595,31 @@ def test_the_allowlist_is_exactly_the_published_keys_plus_named_metadata():
     assert _METADATA_KEYS == {"_commit_hash", "_name_or_path", "dtype"}
 
 
-def test_the_loader_admits_the_commit_hash_transformers_adds_to_every_dict(tmp_path):
+_BASE_REVISION = "ce72df012259dcc55d945e890f815fe7ef69159c"
+
+
+@pytest.mark.parametrize("layout", ["hub-snapshot", "plain-folder"])
+def test_the_loader_admits_the_metadata_transformers_reader_adds(tmp_path, layout):
+    """transformers' reader adds ``_commit_hash`` to the dict: on 5.17 to every dict (None for a
+    plain folder), on 5.19 not for a plain folder (CI run 39626025729), so presence is not
+    asserted for one. A Hub download resolves into the cache's ``snapshots/<commit>/``
+    folder, where the reader records that commit; the loader admits it and keeps it."""
     pytest.importorskip("transformers")
     from transformers import PretrainedConfig
 
-    from soup_cli.utils.kimi_k2 import load_stream_model_config
+    from soup_cli.utils.kimi_k2 import _METADATA_KEYS, load_stream_model_config
 
-    folder = _write_config(tmp_path / "k2", K2_BASE_CONFIG)
-    assert "_commit_hash" in PretrainedConfig.get_config_dict(folder)[0]
-    assert load_stream_model_config(folder).model_type == "deepseek_v3"
+    if layout == "hub-snapshot":
+        directory = tmp_path / "models--moonshotai--Kimi-K2-Base" / "snapshots" / _BASE_REVISION
+    else:
+        directory = tmp_path / "k2"
+    folder = _write_config(directory, K2_BASE_CONFIG)
+    read = PretrainedConfig.get_config_dict(folder)[0]
+    assert set(read) - set(K2_BASE_CONFIG) <= _METADATA_KEYS
+    config = load_stream_model_config(folder)
+    assert config.model_type == "deepseek_v3"
+    # Whatever commit the reader recorded survives the rewrite (the snapshot's, on 5.17).
+    assert config._commit_hash == read.get("_commit_hash")
 
 
 @pytest.mark.parametrize("changes", [case[1] for case in _ADMITTED], ids=[c[0] for c in _ADMITTED])
@@ -1342,17 +1358,48 @@ def test_the_k2_header_map_reproduces_the_real_index_totals():
     assert total == K2_INDEX_TOTAL_SIZE
 
 
+#: The published config at small sizes, every other field (and so every module the skeleton
+#: builds and names) as published. build_meta_skeleton on the full config makes each MoE layer's
+#: fused experts with ``torch.empty`` on the CPU before ``init_empty_weights`` moves them to
+#: meta: 22.5 GB in one allocation, which Linux refuses on a 16 GB CI runner (run 39626025729,
+#: ubuntu 3.11 and 3.12: "DefaultCPUAllocator: can't allocate memory").
+_K2_SIZE_TWIN = {
+    "hidden_size": 64, "intermediate_size": 128, "moe_intermediate_size": 32,
+    "num_hidden_layers": 3, "num_attention_heads": 4, "num_key_value_heads": 4,
+    "n_routed_experts": 8, "kv_lora_rank": 16, "q_lora_rank": 24, "qk_nope_head_dim": 16,
+    "qk_rope_head_dim": 8, "v_head_dim": 16,
+}
+#: What the meta probe of the full-size published config reported (gate G3b, 11 suffixes): the
+#: five MLA projections, the dense MLP's three and the shared expert's three.
+K2_QUANT_SUFFIXES = frozenset({
+    "self_attn.q_a_proj.weight", "self_attn.q_b_proj.weight",
+    "self_attn.kv_a_proj_with_mqa.weight", "self_attn.kv_b_proj.weight",
+    "self_attn.o_proj.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight",
+    "mlp.down_proj.weight", "mlp.shared_experts.gate_proj.weight",
+    "mlp.shared_experts.up_proj.weight", "mlp.shared_experts.down_proj.weight",
+})
+
+
 @pytest.fixture(scope="module")
 def k2_quant_suffixes(tmp_path_factory):
-    """The meta probe's NF4 suffixes for the full-size published config."""
+    """(full-size config folder, the meta probe's NF4 suffixes), the probe run on the size twin:
+    module names do not depend on sizes, and the twin's set must equal the full probe's."""
     pytest.importorskip("transformers")
     pytest.importorskip("bitsandbytes")
     from soup_cli.utils.layer_stream_runtime import build_meta_skeleton, quantised_layer_suffixes
 
+    twin = _base(**_K2_SIZE_TWIN)
+    assert {key for key in K2_BASE_CONFIG if twin[key] != K2_BASE_CONFIG[key]} == set(
+        _K2_SIZE_TWIN
+    )
+    assert twin["num_hidden_layers"] > twin["first_k_dense_replace"]  # dense and MoE layers
     folder = _write_config(tmp_path_factory.mktemp("k2-full"), K2_BASE_CONFIG)
-    probe = build_meta_skeleton(folder, dtype="bfloat16", quant="nf4")
+    probe = build_meta_skeleton(
+        _write_config(tmp_path_factory.mktemp("k2-twin"), twin), dtype="bfloat16", quant="nf4"
+    )
     suffixes = quantised_layer_suffixes(probe)
     del probe
+    assert suffixes == K2_QUANT_SUFFIXES
     return folder, suffixes
 
 
