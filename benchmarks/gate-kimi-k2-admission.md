@@ -540,3 +540,38 @@ is unchanged. Under the house rule, each survivor it listed now has a test that 
 Mutants: r1, r2, r3 (on the key and on the value) and three for LOW 1 (unbounded name, uncapped list,
 no "and N more"). All 7 caught, with sha256 verified. `tests/test_kimi_k2_streaming.py`: 131
 passed. G1b now has 51 refusal cases and 17 admitted variants.
+
+### Second review of the pushed PR (after the results; the rule in sections 1-3 is unchanged)
+
+A review of the pushed head `050ca40b` found CI red and three guard or path findings. After a merge
+of `origin/main` (with #2094, which pins `build_meta_skeleton`'s config read to the bound commit):
+
+- **CI, contract test.** #1972's contract looked for `AutoConfig.from_pretrained` in
+  `stream_setup.py`, and the read had moved into the loader. The contract now runs the setup's own
+  `load_stream_model_config(...)` call through the real loader, with strict receivers on both of
+  its reads (`AutoConfig`, and the raw `config.json` read of a K2 file).
+- **CI, `_commit_hash`.** CI installs transformers 5.19.0, whose reader adds no `_commit_hash` for a
+  plain local folder (5.17 adds `None`). The test now runs on a Hub-snapshot-shaped folder too and
+  asserts only what holds on both versions.
+- **CI, Linux.** The NF4 suffix fixture built the full-size skeleton, and transformers allocates
+  each MoE layer's fused experts on the CPU before they move to meta: 22,548,578,304 B at once,
+  refused on a 16 GB runner. The probe now runs on a size twin of the published config (only size
+  fields differ) and must report the same 11 suffixes as the full-size probe in G3b.
+- **MEDIUM.** The streamed tokenizer load did not get `config=`, so with `--trust-remote-code`
+  `AutoTokenizer` re-read the config with that flag and imported the repository's
+  `configuration_deepseek.py` (traced by the review on 5.17). It now gets the loaded native config.
+  A test runs the setup's tokenizer call with the real `AutoTokenizer` on a local K2 folder whose
+  `configuration_deepseek.py` writes a sentinel file when imported; the file must not appear.
+- **LOW.** Every published key must be present (only `auto_map` and `quantization_config` may be
+  absent; `torch_dtype` may be spelled `dtype`), so a missing scalar cannot take the native
+  default. `rope_scaling` absent and `moe_layer_freq` absent move from the admitted list to the
+  refused one (`rope_scaling: null` is still admitted).
+- **LOW.** Every refusal now says, before its field list, that other K2 releases
+  (Kimi-K2-Instruct-0905, Kimi-K2-Thinking) are out of scope for now. The 0905 `config.json`
+  (revision `ac6c49f0`, sha256 `4cd10b0f...07cc`; the review downloaded that file and nothing else)
+  is refused naming exactly the keys it adds.
+
+G1b now has 57 refusal cases, 16 admitted variants and 43 required-key cases.
+`tests/test_kimi_k2_streaming.py`: 186 passed. 32 mutants (14 new, the review's 8 not run before,
+10 earlier ones on code this round touched): all 32 caught, each file restored and its sha256
+checked.
