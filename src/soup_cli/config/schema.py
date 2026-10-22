@@ -3726,6 +3726,49 @@ class TrainingConfig(BaseModel):
             "double quantization (the default). Off by default."
         ),
     )
+    stream_recompute: Literal["on", "off", "auto"] = Field(
+        default="on",
+        description=(
+            "Whether a streamed decoder layer runs its forward a second time in "
+            "the backward. 'on' (the default) is the shipped checkpoint recompute: "
+            "activations are dropped after the forward and recomputed. 'off': "
+            "every streamed layer keeps its activations instead (the backward "
+            "still re-reads each layer's weights): a faster step where the step "
+            "is compute-bound (the RAM tier), at the cost of every layer's "
+            "activations in VRAM, which the formula pre-flight does not count "
+            "(stream_vram_probe measures it). 'auto': before training, one "
+            "synthetic forward+backward at the configured batch_size x "
+            "data.max_length measures one layer's retained bytes and the step's "
+            "reserved peak; the LAST K layers keep their activations and the rest "
+            "recompute, K = (the smallest of 85% of the card, free + reserved "
+            "VRAM and stream_vram_override) minus that peak, divided by the "
+            "layer's bytes times the step's reserved/allocated ratio. Costs one "
+            "step at setup; RAM tier and CUDA only, otherwise the recompute is "
+            "kept. Gradients are the recompute's: measured bit-identical under "
+            "deterministic algorithms. task='sft' only for 'off' and 'auto', and "
+            "refused beside activation_offloading. YAML reads an unquoted on/off "
+            "(and true/false, yes/no) as a boolean; true is taken as 'on' and "
+            "false as 'off'."
+        ),
+    )
+
+    @field_validator("stream_recompute", mode="before")
+    @classmethod
+    def _validate_stream_recompute_mode(cls, v: Any) -> Any:
+        """YAML 1.1 reads an unquoted ``on``/``off`` (and yes/no/true/false) as a
+        bool. Here the bool agrees with the mode (``stream_recompute: off`` = no
+        recompute), so it is mapped back; an int, including 0/1, is refused."""
+        if v is True:
+            return "on"
+        if v is False:
+            return "off"
+        if not isinstance(v, str):
+            raise ValueError(
+                "training.stream_recompute must be one of 'on', 'off', 'auto'; "
+                f"got {type(v).__name__} {v!r}"
+            )
+        return v
+
     stream_expert_layout: Literal["fused", "per_expert"] = Field(
         default="fused",
         description=(
@@ -6874,6 +6917,7 @@ class SoupConfig(BaseModel):
                 or tcfg.stream_vram_override is not None
                 or tcfg.stream_vram_probe
                 or tcfg.stream_nf4_scale_cache
+                or tcfg.stream_recompute != "on"
                 or tcfg.stream_expert_layout != "fused"
                 or tcfg.stream_disk_kind is not None
                 or tcfg.stream_pin is not None
@@ -6883,7 +6927,8 @@ class SoupConfig(BaseModel):
                     "training.stream_source / training.stream_ngram_source / "
                     "training.stream_buffers / training.stream_read_ahead / "
                     "training.stream_vram_override / training.stream_vram_probe "
-                    "/ training.stream_nf4_scale_cache / training.stream_expert_layout "
+                    "/ training.stream_nf4_scale_cache / training.stream_recompute "
+                    "/ training.stream_expert_layout "
                     "/ training.stream_disk_kind / training.stream_pin "
                     "/ training.stream_loss_chunk set but stream_layers is false; set "
                     "stream_layers=true to stream the base layer-by-layer."
@@ -6975,6 +7020,31 @@ class SoupConfig(BaseModel):
                 f"chunk by chunk; a preference loss reduces the logits to "
                 f"per-token log-probs of chosen and rejected instead, and that "
                 f"reduction is not chunked. Remove training.stream_loss_chunk."
+            )
+        if tcfg.stream_recompute != "on" and self.task != "sft":
+            # Only the SFT step is measured. A loss with two grad-enabled
+            # forwards before one backward would unpack a layer's saved pool
+            # tensors after its slot was refilled, which the owner check
+            # refuses mid-step rather than training on stale weights.
+            raise ValueError(
+                f"training.stream_recompute={tcfg.stream_recompute!r} supports "
+                f"task='sft' only; got task={self.task!r}. Keeping activations "
+                f"instead of the checkpoint recompute is measured on the SFT step "
+                f"only; a loss that runs more than one grad-enabled forward per "
+                f"backward is not supported yet. Remove training.stream_recompute "
+                f"or set it to 'on'."
+            )
+        if tcfg.stream_recompute != "on" and tcfg.activation_offloading is not None:
+            # A retained layer saves its activations through its own
+            # saved_tensors_hooks, the innermost ones, so the offloading hooks
+            # never see them: they would stay on the card, silently.
+            raise ValueError(
+                f"training.stream_recompute={tcfg.stream_recompute!r} cannot be "
+                f"combined with training.activation_offloading="
+                f"{tcfg.activation_offloading!r}: a streamed layer that keeps its "
+                f"activations saves them through its own hooks, so they would stay "
+                f"in VRAM and never be offloaded. Set stream_recompute to 'on' or "
+                f"unset activation_offloading."
             )
         if tcfg.stream_loss_chunk is not None and self.data.format == "raft":
             raise ValueError(
