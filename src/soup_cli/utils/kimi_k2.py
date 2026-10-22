@@ -18,9 +18,12 @@ loaded into ``DeepseekV3Config`` with ``model_type`` rewritten to ``deepseek_v3`
 ``auto_map`` dropped: the rewrite ``AutoConfig`` would do if the file said ``deepseek_v3``.
 
 The guard admits a config only where the native class computes what K2's own
-``modeling_deepseek.py`` computes; each row names the difference it rules out. A config that
-fails any row is refused with :class:`UnsupportedKimiK2Error`, naming every failing field and
-its value. Kimi-K2-Thinking (compressed-tensors INT4) is refused this way. The evidence is
+``modeling_deepseek.py`` computes; each row names the difference it rules out. Every key of the
+published file must be present (``auto_map`` and ``quantization_config`` may be absent), and no
+other key may be. A config that fails any row is refused with :class:`UnsupportedKimiK2Error`,
+naming every failing field and its value, and saying that other K2 releases are out of scope for
+now. Kimi-K2-Thinking (compressed-tensors INT4) and Kimi-K2-Instruct-0905 (serialised defaults,
+``ep_size``, ``pad_token_id``) are refused this way. The evidence is
 ``benchmarks/gate-kimi-k2-admission.md``.
 
 Known numeric differences from K2's own code, which the guard does not and cannot remove: the
@@ -80,6 +83,25 @@ _ALLOWED_KEYS = _PUBLISHED_KEYS | _METADATA_KEYS
 _UNEXPECTED_REASON = (
     "unexpected field {name}: training.stream_layers admits kimi_k2 only with the published K2 "
     "config fields"
+)
+#: Published keys a config may leave out: the rewrite drops ``auto_map`` anyway, and a copy
+#: dequantised to bf16 carries no ``quantization_config``. Every other published key must be
+#: present: a missing one would not be refused by the allowlist, and the native class would
+#: compute with its own default for it (``rope_theta`` 10000.0 where K2 publishes 50000.0,
+#: ``routed_scaling_factor`` 2.5 where K2 publishes 2.827, ...).
+_OPTIONAL_PUBLISHED_KEYS = frozenset({"auto_map", "quantization_config"})
+_REQUIRED_KEYS = tuple(sorted(_PUBLISHED_KEYS - _OPTIONAL_PUBLISHED_KEYS))
+#: A required key either spelling satisfies: transformers 5 writes ``torch_dtype`` as ``dtype``.
+_KEY_SPELLINGS = {"torch_dtype": ("torch_dtype", "dtype")}
+_MISSING_REASON = (
+    "missing field: the published Kimi-K2-Base / -Instruct config sets it, and without it the "
+    "native DeepseekV3Config would use its own default, which need not be K2's value"
+)
+#: Said in every refusal, before the field list (which a release's file can make long).
+_OUT_OF_SCOPE = (
+    "Other Kimi K2 releases (Kimi-K2-Instruct-0905, Kimi-K2-Thinking) and copies whose config "
+    "fields differ from the published Base / Instruct file are out of scope for now: layer "
+    "streaming does not admit them yet."
 )
 #: The ``rope_scaling`` keys K2's yarn reads. The native yarn reads more (``attention_factor``,
 #: ``truncate``, ``partial_rotary_factor``), each of which K2 ignores.
@@ -261,8 +283,9 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
     """Every field of a ``kimi_k2`` config the native class would not compute like K2, in
     guard order; ``()`` when the config is admitted.
 
-    The order is the table in ``benchmarks/gate-kimi-k2-admission.md`` (G1b), then the
-    allowlist of top-level keys added in the review round. Its ``ep_size`` and
+    The order is the table in ``benchmarks/gate-kimi-k2-admission.md`` (G1b), then every
+    published key that is absent (second review; ``auto_map`` and ``quantization_config`` may
+    be), then the allowlist of top-level keys added in the review round. Its ``ep_size`` and
     ``rope_interleave`` rows are now the allowlist's: neither key is in the published file, so
     either is refused whenever present.
     """
@@ -328,6 +351,14 @@ def kimi_k2_guard_failures(raw: Mapping[str, Any]) -> Tuple[GuardFailure, ...]:
     )
     failures.extend(_rope_failures(value("rope_scaling")))
     failures.extend(_quantization_failures(value("quantization_config")))
+    # Every published key present (second review): absent, the native class would compute
+    # with its own default for it. A key whose row above already refused it is named once.
+    named = {failure.field for failure in failures}
+    for key in _REQUIRED_KEYS:
+        if key not in named and not any(
+            spelling in raw for spelling in _KEY_SPELLINGS.get(key, (key,))
+        ):
+            failures.append(GuardFailure(key, _brief(_ABSENT), _MISSING_REASON))
     # Last, so the registered rows above keep their order (added in the review round).
     for key in raw:
         if key not in _ALLOWED_KEYS:  # whatever the value, null included
@@ -348,8 +379,8 @@ def _refusal(failures: Tuple[GuardFailure, ...]) -> UnsupportedKimiK2Error:
     return UnsupportedKimiK2Error(
         f"Kimi K2 (model_type '{KIMI_K2_MODEL_TYPE}') streams through transformers' own "
         f"DeepseekV3 class, admitted only for a config it computes like K2's own modelling "
-        f"code. This config differs: {listed}. Kimi-K2-Base and Kimi-K2-Instruct as published "
-        f"(FP8 block, or dequantised to bf16) pass this check."
+        f"code: Kimi-K2-Base and Kimi-K2-Instruct as published (FP8 block, or dequantised to "
+        f"bf16). {_OUT_OF_SCOPE} This config differs: {listed}."
     )
 
 

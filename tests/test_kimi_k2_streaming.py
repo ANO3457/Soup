@@ -144,6 +144,37 @@ K2_THINKING_CHANGES = {
     "transformers_version": "4.51.3",
 }
 
+#: Every field moonshotai/Kimi-K2-Instruct-0905's ``config.json`` (revision
+#: ac6c49f04883bd0a0598b790693a72061c676629, sha256
+#: 4cd10b0f3cb1c1dfdbfcdd2f303057500f570b24f671ce5eb7650b6a511807cc; the file only, read by the
+#: second review) sets differently from Base, untrimmed. It drops no Base key. The decoder is
+#: the same; beyond max_position_embeddings, rms_norm_eps and the yarn factor it adds
+#: ``ep_size``, ``pad_token_id`` and the serialised ``PretrainedConfig`` defaults.
+K2_INSTRUCT_0905_CHANGES = {
+    "_attn_implementation_autoset": False, "_name_or_path": "", "add_cross_attention": False,
+    "bad_words_ids": None, "begin_suppress_tokens": None, "chunk_size_feed_forward": 0,
+    "cross_attention_hidden_size": None, "decoder_start_token_id": None,
+    "diversity_penalty": 0.0, "do_sample": False, "early_stopping": False,
+    "encoder_no_repeat_ngram_size": 0, "ep_size": 1, "exponential_decay_length_penalty": None,
+    "finetuning_task": None, "forced_bos_token_id": None, "forced_eos_token_id": None,
+    "id2label": {"0": "LABEL_0", "1": "LABEL_1"}, "is_decoder": False,
+    "is_encoder_decoder": False, "label2id": {"LABEL_0": 0, "LABEL_1": 1},
+    "length_penalty": 1.0, "max_length": 20, "max_position_embeddings": 262144, "min_length": 0,
+    "no_repeat_ngram_size": 0, "num_beam_groups": 1, "num_beams": 1, "num_return_sequences": 1,
+    "output_attentions": False, "output_hidden_states": False, "output_scores": False,
+    "pad_token_id": 163839, "prefix": None, "problem_type": None, "pruned_heads": {},
+    "remove_invalid_values": False, "repetition_penalty": 1.0, "return_dict": True,
+    "return_dict_in_generate": False, "rms_norm_eps": 1e-05,
+    "rope_scaling": {
+        "beta_fast": 1.0, "beta_slow": 1.0, "factor": 64.0, "mscale": 1.0, "mscale_all_dim": 1.0,
+        "original_max_position_embeddings": 4096, "type": "yarn",
+    },
+    "sep_token_id": None, "suppress_tokens": None, "task_specific_params": None,
+    "temperature": 1.0, "tf_legacy_loss": False, "tie_encoder_decoder": False,
+    "tokenizer_class": None, "top_k": 50, "top_p": 1.0, "torchscript": False,
+    "transformers_version": "4.51.3", "typical_p": 1.0, "use_bfloat16": False,
+}
+
 
 def _base(**changes):
     raw = copy.deepcopy(K2_BASE_CONFIG)
@@ -441,9 +472,6 @@ _REFUSED = [
     ("num_experts_per_tok-float", {"num_experts_per_tok": 8.0}, "num_experts_per_tok", "8.0"),
     ("num_experts_per_tok-bool", {"num_experts_per_tok": True, "norm_topk_prob": False},
      "num_experts_per_tok", "True"),
-    ("num_experts_per_tok-norm-absent",
-     lambda: _without("norm_topk_prob", raw=_base(num_experts_per_tok=1)),
-     "num_experts_per_tok", "1"),
     ("moe_layer_freq", {"moe_layer_freq": 2}, "moe_layer_freq", "2"),
     ("ep_size", {"ep_size": 8}, "ep_size", "8"),
     ("ep_size-text", {"ep_size": "1"}, "ep_size", "'1'"),
@@ -496,6 +524,17 @@ _REFUSED = [
     ("sliding_window", {"sliding_window": 4096}, "sliding_window", "4096"),
     # Round-2 review: a null value of a key outside the allowlist is refused like any other.
     ("head_dim-null", {"head_dim": None}, "head_dim", "None"),
+    # Second review (LOW 3): a published key may not be left out, or the native class would
+    # compute with its own default (rope_theta 10000.0, routed_scaling_factor 2.5, ...). The
+    # first two were admitted before; every published key is covered by the test below.
+    ("moe_layer_freq-absent", lambda: _without("moe_layer_freq"), "moe_layer_freq", "absent"),
+    ("rope_scaling-absent", lambda: _without("rope_scaling"), "rope_scaling", "absent"),
+    ("rope_theta-absent", lambda: _without("rope_theta"), "rope_theta", "absent"),
+    ("routed_scaling_factor-absent", lambda: _without("routed_scaling_factor"),
+     "routed_scaling_factor", "absent"),
+    ("rms_norm_eps-absent", lambda: _without("rms_norm_eps"), "rms_norm_eps", "absent"),
+    ("norm_topk_prob-absent", lambda: _without("norm_topk_prob"), "norm_topk_prob", "absent"),
+    ("torch_dtype-absent", lambda: _without("torch_dtype"), "torch_dtype", "absent"),
 ]
 
 
@@ -522,6 +561,48 @@ def test_each_guard_failure_is_refused_naming_the_field_and_its_value(changes, f
     assert f"{field}=" in message
     assert shown in message
     assert "kimi_k2" in message
+    assert "out of scope for now" in message
+
+
+#: Published keys a K2 config may leave out: the rewrite drops ``auto_map``, and a copy
+#: dequantised to bf16 has no ``quantization_config``.
+_OPTIONAL_PUBLISHED = {"auto_map", "quantization_config"}
+
+
+@pytest.mark.parametrize("key", sorted(set(K2_BASE_CONFIG) - _OPTIONAL_PUBLISHED))
+def test_every_published_key_but_auto_map_and_quantization_config_is_required(key):
+    """Second review (LOW 3): a K2 file without a published key was admitted when no row read
+    that key, and the native class then computed with its own default for it."""
+    from soup_cli.utils.kimi_k2 import UnsupportedKimiK2Error, kimi_k2_native_config_dict
+
+    with pytest.raises(UnsupportedKimiK2Error) as caught:
+        kimi_k2_native_config_dict(_without(key))
+    assert f"{key}=absent" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", sorted(_OPTIONAL_PUBLISHED))
+def test_auto_map_and_quantization_config_may_be_absent(key):
+    from soup_cli.utils.kimi_k2 import kimi_k2_guard_failures
+
+    assert kimi_k2_guard_failures(_without(key)) == ()
+
+
+def test_top_1_without_norm_topk_prob_is_refused_on_both_rows():
+    """Absent, ``norm_topk_prob`` reads as renormalising, which K2 skips at top-1; the
+    presence row names the missing key as well."""
+    from soup_cli.utils.kimi_k2 import kimi_k2_guard_failures
+
+    raw = _without("norm_topk_prob", raw=_base(num_experts_per_tok=1))
+    failures = kimi_k2_guard_failures(raw)
+    assert [failure.field for failure in failures] == ["num_experts_per_tok", "norm_topk_prob"]
+    assert [failure.value for failure in failures] == ["1", "absent"]
+
+
+def test_a_key_its_own_row_refuses_as_absent_is_named_once():
+    from soup_cli.utils.kimi_k2 import kimi_k2_guard_failures
+
+    failures = kimi_k2_guard_failures(_without("architectures", "n_group"))
+    assert [failure.field for failure in failures] == ["architectures", "n_group"]
 
 
 def test_the_refusal_is_a_value_error_raised_by_the_loader_before_any_model(tmp_path):
@@ -555,8 +636,6 @@ def test_thinking_is_refused_and_quantization_config_is_the_first_failing_field(
 
 _ADMITTED = [
     ("published", {}),
-    ("moe_layer_freq-absent", lambda: _without("moe_layer_freq")),
-    ("rope_scaling-absent", lambda: _without("rope_scaling")),
     ("rope_scaling-null", {"rope_scaling": None}),
     ("rope-rope_type-yarn", _rope(rope_type="yarn")),
     ("rope-mscale-pair-absent", _rope_without("mscale", "mscale_all_dim")),
@@ -574,6 +653,8 @@ _ADMITTED = [
     ("n_shared_experts-0", {"n_shared_experts": 0}),
     ("metadata", {"_commit_hash": "ce72df012259dcc55d945e890f815fe7ef69159c",
                   "_name_or_path": "moonshotai/Kimi-K2-Base", "dtype": "bfloat16"}),
+    # transformers 5 spells the published torch_dtype as dtype: either satisfies the key.
+    ("torch_dtype-as-dtype", lambda: _without("torch_dtype", raw=_base(dtype="bfloat16"))),
 ]
 
 
@@ -586,6 +667,30 @@ def test_thinking_without_its_quantization_is_still_refused_by_the_allowlist():
     assert [failure.field for failure in failures] == ["ep_size", "pad_token_id"]
     assert all("unexpected field" in failure.reason for failure in failures)
     assert all("training.stream_layers" in failure.reason for failure in failures)
+
+
+def test_kimi_k2_instruct_0905_is_refused_as_out_of_scope_before_its_field_list(tmp_path):
+    """Second review (LOW 4): the 0905 file was refused with a long list of serialised defaults
+    and "and N more", never saying that the release is not admitted. Every refusal now says so,
+    before the list; the fields it names are exactly the keys the published file lacks."""
+    pytest.importorskip("transformers")
+    from soup_cli.utils.kimi_k2 import (
+        _METADATA_KEYS,
+        UnsupportedKimiK2Error,
+        kimi_k2_guard_failures,
+        load_stream_model_config,
+    )
+
+    raw = _base(**K2_INSTRUCT_0905_CHANGES)
+    extra = [key for key in raw if key not in K2_BASE_CONFIG and key not in _METADATA_KEYS]
+    assert [failure.field for failure in kimi_k2_guard_failures(raw)] == extra
+    with pytest.raises(UnsupportedKimiK2Error) as caught:
+        load_stream_model_config(_write_config(tmp_path / "0905", raw))
+    message = str(caught.value)
+    scope = message.index("Other Kimi K2 releases (Kimi-K2-Instruct-0905, Kimi-K2-Thinking)")
+    assert "out of scope for now" in message[scope:message.index("This config differs:")]
+    assert message.index("This config differs:") > scope
+    assert f"and {len(extra) - 10} more" in message
 
 
 def test_the_allowlist_is_exactly_the_published_keys_plus_named_metadata():
