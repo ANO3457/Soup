@@ -974,7 +974,9 @@ Three POST routes are now available on `soup serve`:
 
 - **`POST /v1/tools/python`** — runs caller-supplied Python code in an isolated
   sub-process. Bounded by 512 MB memory, 5-second wall-clock timeout, and a
-  single-worker concurrency cap.
+  single-worker concurrency cap. Like `/v1/tools/bash`, it runs only where the host
+  provides OS-level isolation (`os.unshare` on Linux with Python 3.12+, `sandbox-exec`
+  on macOS) and answers HTTP 501 elsewhere, including on Windows.
 - **`POST /v1/tools/web_search`** — searches the web and returns domain-filtered results
   as `[{url, title, snippet}]` with snippets sanitized (null bytes stripped).
   Deny-by-default via `WebSearchConfig.domain_allowlist`.

@@ -897,14 +897,27 @@ def _create_test_app(host: str = "127.0.0.1", auth_token: str | None = None, **k
     )
 
 
+def _allow_live_python_tool(monkeypatch) -> None:
+    """Let a live /v1/tools/python run proceed on a host without OS isolation.
+
+    The route answers 501 under the ``best-effort`` isolation strategy (Windows,
+    Linux without ``os.unshare``); these tests exercise the live sandbox run.
+    """
+    from soup_cli.trainer import rewards
+
+    if rewards._get_isolation_strategy() == "best-effort":
+        monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "namespaces")
+
+
 class TestToolEndpointsLive:
     @pytest.fixture(autouse=True)
     def _require_fastapi(self):
         pytest.importorskip("fastapi")
         pytest.importorskip("httpx")
 
-    def test_python_tool_runs_simple_code(self):
+    def test_python_tool_runs_simple_code(self, monkeypatch):
         from fastapi.testclient import TestClient
+        _allow_live_python_tool(monkeypatch)
         app = _create_test_app()
         client = TestClient(app, base_url="http://127.0.0.1")
         resp = client.post(
@@ -1318,9 +1331,10 @@ class TestToolEndpointsLive:
         assert any("example.com" in u for u in urls)
         assert all("other.com" not in u for u in urls)
 
-    def test_tools_no_longer_return_501(self):
+    def test_tools_no_longer_return_501(self, monkeypatch):
         """v0.53.7 #103 regression: 501-stubs are gone."""
         from fastapi.testclient import TestClient
+        _allow_live_python_tool(monkeypatch)
         app = _create_test_app()
         client = TestClient(app, base_url="http://127.0.0.1")
         # Python: should return 200 with sandbox response.
@@ -1879,12 +1893,14 @@ class TestReviewFixesSSEHeaders:
 class TestReviewFixesAuthToken:
     """v0.53.7 H-A: optional Bearer-token gate on tool endpoints."""
 
-    def test_python_tool_with_auth_token_requires_bearer(self):
+    def test_python_tool_with_auth_token_requires_bearer(self, monkeypatch):
         try:
             import fastapi  # noqa: F401
         except ImportError:
             pytest.skip("FastAPI not installed")
         from fastapi.testclient import TestClient
+
+        _allow_live_python_tool(monkeypatch)
 
         from soup_cli.commands.serve import _create_app
 
@@ -1915,12 +1931,14 @@ class TestReviewFixesAuthToken:
         )
         assert resp.status_code == 200
 
-    def test_auth_token_none_means_no_gate(self):
+    def test_auth_token_none_means_no_gate(self, monkeypatch):
         try:
             import fastapi  # noqa: F401
         except ImportError:
             pytest.skip("FastAPI not installed")
         from fastapi.testclient import TestClient
+
+        _allow_live_python_tool(monkeypatch)
 
         from soup_cli.commands.serve import _create_app
 
