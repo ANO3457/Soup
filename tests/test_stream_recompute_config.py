@@ -1,8 +1,9 @@
 """Layer streaming: the ``training.stream_recompute`` config field.
 
 'on' is the shipped checkpoint recompute; 'off' keeps every streamed layer's
-activations; 'auto' keeps them for as many of the last layers as fit after the
-first optimizer step (RAM tier only). The runtime and the setup wiring are in
+activations; 'auto' keeps them for as many of the last layers as fit, decided at
+setup from one synthetic step at the configured batch x max_length (RAM tier
+only). The runtime and the setup wiring are in
 ``tests/test_stream_recompute.py``.
 """
 
