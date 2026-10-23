@@ -996,13 +996,32 @@ Three POST routes are now available on `soup serve`:
 
 - **`POST /v1/tools/bash`** — runs a bash command with strict OS-level network
   isolation (`unshare` on supported Linux runtimes, `sandbox-exec` on macOS).
-  Enforces mandatory Bearer token authentication when bound to a non-loopback host,
+  Enforces the `--tool-auth-token` Bearer token on every bind,
   a 5-second wall-clock timeout, a minimal secret-scrubbed environment, and a combined
   10KB stdout/stderr streaming kill limit. Returns the real stdout, stderr, exit code,
   and timeout state. This is not a filesystem sandbox: the child retains the server
   process's read access to world-readable system files. The endpoint fails closed with
   HTTP 501 when strict OS isolation is unavailable (including on Windows or restricted
   Linux containers).
+
+**`/v1/tools/python` and `/v1/tools/bash` need `--tool-auth-token` on every bind.** A
+server started without it answers both routes with 401 on loopback too, as it already did
+on any other bind, and the reply names the fix. Start the server with a token, from the
+option or from `SOUP_TOOL_AUTH_TOKEN` (which keeps it off the command line and out of the
+shell history), and send it as a Bearer header:
+
+```bash
+export SOUP_TOOL_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+soup serve --model ./output
+
+curl -X POST http://127.0.0.1:8000/v1/tools/python \
+  -H "Authorization: Bearer $SOUP_TOOL_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "print(1)"}'
+```
+
+`/v1/tools/web_search`, `/v1/thumbs` and the adapter routes keep their rule: on a loopback
+bind they take a token only when the server has one.
 
 Tool routes, `/v1/thumbs` and adapter activate/deactivate accept requests only when the
 `Host` header names the bound address (any loopback name for a loopback bind) and any
