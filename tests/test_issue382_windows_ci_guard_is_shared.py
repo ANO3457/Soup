@@ -8,12 +8,13 @@ original guard did not cover. Copying the predicate would have been the third
 time this repo shipped a duplicated source of truth (#372, #392, #424), so it
 moved to ``tests/_windows_ci.py`` and both call sites import it.
 
-These tests exist so a future copy fails loudly instead of drifting. One file
-carries the guard now: the two NF4 tests in ``test_v07202.py``, whose crash is
-the bitsandbytes wheel. The others traced to CPU bf16/fp16 matmuls (#1314) and
-request ``aten_half_matmuls`` instead (#1359). Both sets are named here, in
-:data:`GUARDED_TESTS` and :data:`FIXTURE_TESTS`, so a deleted decorator or a
-dropped fixture fails here too.
+These tests exist so a future copy fails loudly instead of drifting. Two files
+carry the guard now: the two NF4 tests in ``test_v07202.py``, whose crash is
+the bitsandbytes wheel, and the ``cpu-bf16-autocast`` case (that case only) of
+``test_expert_stream.py``. The others traced to CPU bf16/fp16 matmuls (#1314) and
+request ``aten_half_matmuls`` instead (#1359). The sets are named here, in
+:data:`GUARDED_TESTS`, :data:`GUARDED_PARAMS` and :data:`FIXTURE_TESTS`, so a
+deleted decorator or a dropped fixture fails here too.
 """
 
 from __future__ import annotations
@@ -30,10 +31,11 @@ from tests._windows_ci import _windows_ci, skip_on_windows_ci
 _TESTS_DIR = Path(__file__).resolve().parent
 _HOME = _TESTS_DIR / "_windows_ci.py"
 
-#: The files that gate a real ``trainer.train()`` behind the shared guard. One
-#: now: #382 (v07202). v05311, test_rewind_hf and test_rewind_wiring dropped it
+#: The files that gate a crashing native kernel behind the shared guard: #382
+#: (v07202, a real ``trainer.train()``) and the CPU bf16-autocast case of
+#: test_expert_stream. v05311, test_rewind_hf and test_rewind_wiring dropped it
 #: in #1359, once #1314 traced their crash to CPU half-precision matmuls.
-KNOWN_CALL_SITES = ("test_v07202.py",)
+KNOWN_CALL_SITES = ("test_v07202.py", "test_expert_stream.py")
 
 
 class TestThereIsExactlyOneDefinition:
@@ -120,6 +122,19 @@ GUARDED_TESTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Tests that skip ONE parametrisation, not the whole test: file -> test -> the
+#: ``pytest.param`` ids that must carry the marker. Every other id of that test
+#: must carry none, and the test itself must not be decorated: the fp32 control
+#: is the half that proves the comparison is not vacuous, and it never reaches
+#: a half-precision kernel.
+GUARDED_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "test_expert_stream.py": {
+        "test_streamed_experts_backward_preserves_forward_autocast": (
+            "cpu-bf16-autocast",
+        ),
+    },
+}
+
 #: Every test that runs a real CPU bf16/fp16 step and requests
 #: ``aten_half_matmuls`` instead of the skip (#1314, #1359). Dropping the fixture
 #: from one of them sends its matmuls back to oneDNN / MKL, which is the path that
@@ -151,6 +166,26 @@ def _param_names(node: ast.FunctionDef) -> set:
     return {arg.arg for arg in node.args.args}
 
 
+def _is_call_to(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Call) and getattr(node.func, "attr", "") == name
+
+
+def _param_marks(node: ast.FunctionDef) -> dict:
+    """``pytest.param(..., id=...)`` id -> its ``marks`` source (None if it has none)."""
+    found = {}
+    for decorator in node.decorator_list:
+        if not _is_call_to(decorator, "parametrize"):
+            continue
+        for call in ast.walk(decorator):
+            if _is_call_to(call, "param"):
+                keywords = {kw.arg: kw.value for kw in call.keywords}
+                marks = keywords.get("marks")
+                found[ast.literal_eval(keywords["id"])] = (
+                    None if marks is None else ast.unparse(marks)
+                )
+    return found
+
+
 def _find_test(filename: str, target: str) -> ast.FunctionDef:
     tree = ast.parse((_TESTS_DIR / filename).read_text(encoding="utf-8"))
     found = [
@@ -177,8 +212,78 @@ class TestTheCrashingTestsAreActuallyGuarded:
         )
 
     def test_every_guarded_file_is_a_known_call_site(self):
-        """The two lists cannot drift apart."""
-        assert set(GUARDED_TESTS) == set(KNOWN_CALL_SITES)
+        """The lists cannot drift apart."""
+        assert set(GUARDED_TESTS) | set(GUARDED_PARAMS) == set(KNOWN_CALL_SITES)
+
+
+def _marker_condition(platform: str, ci: str | None) -> bool:
+    """The condition ``skip_on_windows_ci`` has on a host with this platform and ``CI``.
+
+    The marker's condition is computed once, when ``tests/_windows_ci.py`` is
+    imported, so patching the platform afterwards changes nothing. Executing the
+    module's source in a throwaway namespace evaluates it again without touching
+    the real module (a ``reload`` would swap the marker object that every test file
+    already holds).
+    """
+    source = _HOME.read_text(encoding="utf-8")
+    namespace = {"__name__": "_windows_ci_probe"}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sys, "platform", platform)
+        if ci is None:
+            patch.delenv("CI", raising=False)
+        else:
+            patch.setenv("CI", ci)
+        exec(compile(source, str(_HOME), "exec"), namespace)
+    return namespace["skip_on_windows_ci"].args[0]
+
+
+class TestTheExpertStreamBf16SkipStaysNarrow:
+    """The skip on ``cpu-bf16-autocast`` must exclude one CI fleet, nothing more.
+
+    Run 40003126970 (windows 3.12, PR #1855): the eager reference module's bf16
+    forward under CPU autocast died with ``0xc000001d``, the xdist worker was
+    replaced and the cell timed out 45 minutes later. A skip that quietly widened
+    would remove the case from ubuntu and macos too and look exactly like a pass,
+    so both edges of the condition are pinned on the marker itself, plus which
+    parametrisations carry it.
+    """
+
+    def test_it_skips_on_a_windows_runner(self):
+        assert _marker_condition("win32", "true") is True
+
+    def test_it_runs_on_a_local_windows_box(self):
+        """The maintainer's Windows CPU is known to run bf16 autocast."""
+        assert _marker_condition("win32", None) is False
+
+    def test_it_runs_on_linux_ci(self):
+        assert _marker_condition("linux", "true") is False
+
+    def test_it_runs_on_macos_ci(self):
+        assert _marker_condition("darwin", "true") is False
+
+    @pytest.mark.parametrize(
+        "filename, target, skipped",
+        [
+            (filename, target, ids)
+            for filename, targets in GUARDED_PARAMS.items()
+            for target, ids in targets.items()
+        ],
+    )
+    def test_only_the_named_cases_carry_the_marker(self, filename, target, skipped):
+        node = _find_test(filename, target)
+        assert "skip_on_windows_ci" not in _decorator_names(node), (
+            f"{filename}::{target} is decorated, which skips every case; put the marker "
+            f"on the pytest.param of {skipped} instead"
+        )
+        cases = _param_marks(node)
+        assert set(skipped) <= set(cases), (
+            f"{filename}::{target} has no pytest.param with id in {skipped}: {sorted(cases)}"
+        )
+        for case, marks in cases.items():
+            if case in skipped:
+                assert marks == "skip_on_windows_ci", (case, marks)
+            else:
+                assert marks is None, f"{filename}::{target}[{case}] must keep running: {marks}"
 
 
 class TestTheHalfPrecisionTestsRequestTheFixture:
