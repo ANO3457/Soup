@@ -76,11 +76,11 @@ def sandbox_calls(monkeypatch):
 
     calls: list[tuple[str, str]] = []
 
-    def _fake_python(code):
+    def _fake_python(code, **_options):
         calls.append(("python", code))
         return "ran\n"
 
-    def _fake_bash(command):
+    def _fake_bash(command, **_options):
         calls.append(("bash", command))
         return rewards.SandboxProcessResult(returncode=0, stdout="ran\n", stderr="")
 
