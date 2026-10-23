@@ -298,4 +298,97 @@ short is NO VERDICT.
 
 ## 12. Results
 
-Not run.
+Series run on 2026-10-23, from a1's `before` line (14:05:38Z) to a2's `after` line (15:20:45Z), about 75 minutes. Commands exactly as section 8, at commit `d83e57721`, with the base interpreter, one fresh process per run, `--steps 1`. Raw files are in `benchmarks/results/probe-rtx5070/giant-moe/seq-scaling/{a1,b1,b2,a2}/` (`box.jsonl`, `watchdog.jsonl`, `watchdog.json`, `step.json`, `exit.txt`, `stdout.log`, `stderr.log`).
+
+Every number below is "random weights, shape only; routing forced uniform", from a measurement harness (`benchmarks/harness/moe_stream_step.py`), not `soup train`, one step per process. Nothing here shows more than that.
+
+A first attempt at a1 started at 13:54:46Z the same day and died at about 14:01Z when the session that launched it closed (no `exit.txt`, process gone). Its files were moved out of the repository and are not used here. The series below is a full run from scratch.
+
+### 12.1 Verdict
+
+**NO VERDICT.** Gate V5 (no swap in the step) failed in three of the four runs (a1, b1, b2). Section 5 makes an outcome valid only if every gate passes in all four runs, and section 6 calls a run that fails V4-V7 "a disturbed box, not a result". So the section-5 claim is not made, and none of SHIP, REFUTED or NOT SHIPPED is declared. Section 6 allows the whole ABBA series to be repeated once, in a new window, with the two series never mixed. That was not done in this window.
+
+The measured ratios are listed in 12.3 as numbers, not as a result. For the record, they sit above the 3.0 SHIP floor and above the 3.4 / 3.6 "nearly in proportion" floors, and the rule gives them no standing because V5 failed.
+
+### 12.2 Arms
+
+| run | seq | step seconds | tokens/s | peak alloc (MiB) | peak reserved (MiB) | peak working set (GB) | RAM available before (GB) | bytes read from D: (GB) | drive rate D / t (GB/s) |
+|---|---|---|---|---|---|---|---|---|---|
+| a1 | 512 | 1036.40 | 0.494 | 4,342 | 5,052 | 7.620 | 13.72 | 1,586.79 | 1.531 |
+| b1 | 2048 | 1117.61 | 1.832 | 6,091 | 7,176 | 7.608 | 10.47 | 1,586.79 | 1.420 |
+| b2 | 2048 | 1120.52 | 1.828 | 6,091 | 7,176 | 7.603 | 15.14 | 1,586.79 | 1.416 |
+| a2 | 512 | 1036.30 | 0.494 | 4,342 | 5,052 | 7.729 | 15.61 | 1,586.79 | 1.531 |
+
+- Peak working set is the watchdog's process-tree peak. The harness's own `peak_host_bytes_so_far` is 7.77, 7.76, 7.76, 7.76 GB.
+- The loss repeats exactly inside each pair: 13.4771 at seq 512 (a1, a2) and 13.4916 at seq 2048 (b1, b2).
+- Gaps between runs, `after` to the next `before`: 37 s, 27 s, 28 s. The latest start was a2, 57 min 19 s after a1's `before` line (cap: 95 min).
+
+### 12.3 Ratios (section 5)
+
+- R1 = 4 x 1036.40 / 1117.61 = **3.709**
+- R2 = 4 x 1036.30 / 1120.52 = **3.699**
+- Rpool = 4 x (1036.40 + 1036.30) / (1117.61 + 1120.52) = **3.704**
+- Seq 2048 cost 81.21 s more than seq 512 in the first pair, 84.22 s in the second, 82.72 s pooled. The two runs of the same arm differed by 0.10 s (a1 vs a2) and 2.91 s (b1 vs b2).
+
+### 12.4 Validity gates (section 6)
+
+| gate | a1 | b1 | b2 | a2 |
+|---|---|---|---|---|
+| V1 completes | pass | pass | pass | pass |
+| V2 same work | pass | pass | pass | pass |
+| V3 VRAM | pass | pass | pass | pass |
+| V4 host RAM | pass | pass | pass | pass |
+| V5 no swap in the step | **FAIL** | **FAIL** | **FAIL** | pass |
+| V6 awake, on AC | pass | pass | pass | pass |
+| V7 bytes from the drive | pass | pass | pass | pass |
+| V8 direct I/O | pass | pass | pass | pass |
+| V9 code | pass | pass | pass | pass |
+
+- **V1:** exit 0 in all four, one step each, `loss_finite` and `grads_finite` true, `grads_present` 610, `loss_positions` 512.
+- **V2:** `store_bytes` 533,242,299,230, `expert_fetches` 69,120, `expert_bytes_read` 1,570,336,174,080 and `layer_loads` 120 in all four runs.
+- **V3:** peak alloc 4,342 / 6,091 / 6,091 / 4,342 MiB against 7,500; peak reserved 5,052 / 7,176 / 7,176 / 5,052 MiB against 7,800. The seq-2048 margins are 1,409 MiB (alloc) and 624 MiB (reserved).
+- **V4:** available RAM in the `before` lines was 13.72 / 10.47 / 15.14 / 15.61 GB (floor 10). `peak_host_bytes_so_far` was under 7.8 GB in every run (limit 20 GB). The watchdog did not fire. The lowest free RAM it sampled inside a run was 2.87 / 3.47 / 7.31 / 7.72 GB (its floor is 1.5 GB).
+- **V5:** `os_io.disk_read_bytes["PhysicalDrive0"]` was 2,312,677,888 / 2,457,071,616 / 8,110,742,528 / 1,722,067,456 bytes against an allowance of 2,147,483,648. That is 1.08x, 1.14x and 3.78x the allowance in a1, b1 and b2, and 0.80x in a2.
+- **V6:** `gaps == []`, `off_ac_samples == 0` and `ac == 2` in both box lines of all four runs. The Kernel-Power query of section 8 (events 41 and 42, from a1's `box.jsonl` creation time) printed nothing. Lid state cannot be read by software. No sleep gap was seen in the 5 s samples.
+- **V7:** D (`PhysicalDrive1`) was 1,586,785,970,176 bytes in a1, a2 and b1 and 1,586,785,978,368 in b2, which is 1.0105x `expert_bytes_read`. |D - P| / P was 0.045%, 0.054%, 0.055%, 0.055% (limit 2%). `foreign_compute_pids == []` in all four. A measurement hold covering the window was declared on `.claude/SESSIONS.md` before the series (by the session that launched this one) and was read there, read-only, after it.
+- **V8:** `direct_io_drives == 1` in all four.
+- **V9:** P0: the import path was under the worktree's `src` and the prefix check printed `True`. P1: `git log -1` gave `d83e5772187ff1b218cfe11797964e0e22ee12ee`, with a clean tree. P2: `1 passed, 15 deselected in 25.73s`.
+
+What the V5 failure looked like. The `PagesInputPersec` counter in the box lines rose by 597,063 / 639,377 / 1,898,033 / 488,689 pages between each run's `before` and `after` line. At 4,096 B per page that is 2.45 / 2.62 / 7.77 / 2.00 GB, against PhysicalDrive0 reads of 2.31 / 2.46 / 8.11 / 1.72 GB, in the same rank order. That is consistent with page-ins (hard faults) being the source of the C: reads. Whether they came from the pagefile or from mapped library files was not separated, and nothing here tests it. Step time did not follow the C: reads: b1 and b2 differ by 0.26% in step time with 2.46 GB and 8.11 GB read from C:.
+
+### 12.5 Where the time goes (section 7)
+
+- mean t(A) = 1036.35 s, mean t(B) = 1119.065 s.
+- c = (1119.065 - 1036.35) / 1536 = 0.05385 s per token.
+- F = 1036.35 - 512 x 0.05385 = 1008.78 s. F / mean t(A) = **0.973**.
+- Drive rate D / t: 1.531, 1.420, 1.416, 1.531 GB/s. None reaches the 3.27 GB/s line, so the step is not called disk-bound.
+- F / mean t(A) is at least 0.9, so by the wording rule the step is called **fetch-bound**: the time is the per-expert fetch chain, which scales with bytes, not tokens, while the drive ran below its ceiling. This probe cannot split that chain into read, copy and dequantisation. The section-7 wording does not depend on the verdict, but it comes from a series that failed V5.
+
+### 12.6 Predictions (section 10) against measured
+
+| | predicted | measured | |
+|---|---|---|---|
+| step seconds, seq 512 | 850-1,150 | 1036.4, 1036.3 | inside |
+| step seconds, seq 2048 | t(512) + 10 to 60 | 1117.61, 1120.52 (t(512) + 81.2, + 84.2) | outside, 21-24 s above the top of the range |
+| tokens/s, seq 512 | 0.45-0.60 | 0.494 | inside |
+| tokens/s, seq 2048 | 1.7-2.4 | 1.832, 1.828 | inside |
+| R1, R2, Rpool | 3.74-3.96 | 3.709, 3.699, 3.704 | below the range by 0.03-0.04 |
+| peak alloc, seq 512 | 4,342 MiB | 4,342 | equal |
+| peak alloc, seq 2048 | 5,665-5,770 MiB | 6,091 | 321 MiB above the top of the range |
+| peak reserved, seq 512 | about 5,050 MiB | 5,052 | inside |
+| peak reserved, seq 2048 | 6,120-6,480 MiB | 7,176 | 696 MiB above the top of the range |
+| peak working set | 7.6-8.2 GB | 7.60-7.73 GB | inside |
+| expert bytes per step | 1,570,336,174,080 | 1,570,336,174,080 | equal |
+| drive rate, seq 512 | 1.4-1.9 GB/s | 1.531 | inside |
+| drive rate, seq 2048 | 1.3-1.9 GB/s | 1.420, 1.416 | inside |
+| wording | fetch-bound, not disk-bound | fetch-bound, not disk-bound | as predicted |
+
+The VRAM estimate of section 2.4 was low at seq 2048 (both allocated and reserved), and the compute increment of section 2.3 was larger than estimated. The gates were not affected by the VRAM miss.
+
+### 12.7 Procedure notes
+
+- The P3 box checks ran before P2 (the rule puts P3 "before anything else"). P2 ran directly as a plain pytest call, not through the lock script. P3 values: `Get-Partition` gave disk 1 for D:, `index.json` existed, `nvidia-smi` listed no compute apps, 13.19 GB RAM was available, `BatteryStatus` was 2.
+- A sleep guard ran for the whole series: a wrapper process that sets Windows' execution-state request (`SetThreadExecutionState`) while it lives, around a 7,500 s sleep, stopped after a2. No power setting was changed.
+- Available RAM was at least 10 GB at every launch, so no arm waited for it.
+- The hold on the shared board was not edited or lifted by the session that ran the arms.
+- The Status line at the top of this file still reads "PRE-REGISTERED, NOT RUN." and was not edited. No text of sections 1-11 was edited, and no typo correction was made.
