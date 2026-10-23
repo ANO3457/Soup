@@ -1,8 +1,8 @@
 # Probe: do more tokens per step raise the tokens/s of the synthetic 1T MoE step? RTX 5070 Laptop 8 GB
 
-Status: **PRE-REGISTERED, NOT RUN.** This rule, its thresholds and the harness change it needs
-(section 3) were committed together, before any run. Results go in section 12, which is
-empty until then. Nothing in sections 1-11 may be edited after the first run except to
+Status: **PRE-REGISTERED (d83e57721); RUN 2026-10-23: NO VERDICT, gate V5 failed in 3 of 4 runs
+(section 12).** This rule, its thresholds and the harness change it needs (section 3) were
+committed together, before any run. Results are in section 12. Nothing in sections 1-11 may be edited after the first run except to
 correct a typo, and any such correction is listed in section 12.
 
 **Every number this probe produces is "random weights, shape only; routing forced uniform".**
@@ -391,4 +391,4 @@ The VRAM estimate of section 2.4 was low at seq 2048 (both allocated and reserve
 - A sleep guard ran for the whole series: a wrapper process that sets Windows' execution-state request (`SetThreadExecutionState`) while it lives, around a 7,500 s sleep, stopped after a2. No power setting was changed.
 - Available RAM was at least 10 GB at every launch, so no arm waited for it.
 - The hold on the shared board was not edited or lifted by the session that ran the arms.
-- The Status line at the top of this file still reads "PRE-REGISTERED, NOT RUN." and was not edited. No text of sections 1-11 was edited, and no typo correction was made.
+- After the series, the Status line at the top of this file (above section 1) was changed from "PRE-REGISTERED, NOT RUN." to name the run and its outcome. No text of sections 1-11 was edited, and no typo correction was made.
