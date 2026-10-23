@@ -379,9 +379,9 @@ class SandboxIsolationError(PermissionError):
     """A strict sandbox run could not start its isolated child.
 
     Raised by ``_run_code_sandbox(..., strict_namespaces=True)`` when the child
-    fails to launch, which is where the OS-level isolation is set up (the Linux
-    namespaces in the pre-exec hook, the ``sandbox-exec`` wrapper on macOS).
-    The code did not run.
+    fails to launch because the Linux namespaces could not be set up in the
+    pre-exec hook. The code did not run. (A ``sandbox-exec`` wrapper that fails
+    on macOS is a non-zero exit of a launched child, not this error.)
     """
 
 
