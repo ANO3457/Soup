@@ -493,9 +493,12 @@ def test_tool_endpoint_returns_501(path: str, monkeypatch):
     endpoint was reverted to 501 by the v0.53.7 review (C1) — its 501
     surface is asserted in ``test_v0537.py::TestReviewFixesC1BashStub``.
     The python route answers 501 where the host has no OS-level isolation
+    or the namespace ``unshare`` fails at run time
     (``tests/test_serve_python_tool_isolation.py``), so this test runs it
-    under an isolating strategy.
+    under an isolating strategy whose ``unshare`` is a no-op that succeeds.
     """
+    import os
+
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -503,6 +506,7 @@ def test_tool_endpoint_returns_501(path: str, monkeypatch):
 
     if rewards._get_isolation_strategy() == "best-effort":
         monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "namespaces")
+    monkeypatch.setattr(os, "unshare", lambda *args, **kwargs: None, raising=False)
     app = _build_app()
     client = TestClient(app, base_url="http://127.0.0.1")
     response = client.post(path, json={"code": "print(1)"})

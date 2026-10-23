@@ -2316,20 +2316,22 @@ def _create_app(
             raise HTTPException(status_code=400, detail="Invalid request")
         if len(code) > tool_max_code_len:
             raise HTTPException(status_code=400, detail="Invalid request")
+        from soup_cli.trainer.rewards import (
+            SandboxIsolationError,
+            _get_isolation_strategy,
+            _run_code_sandbox,
+        )
+
+        # Same requirement as /v1/tools/bash: run only where the host
+        # provides OS-level isolation (namespaces / sandbox-exec), and only
+        # when that isolation is actually set up for the run (strict).
+        isolation_detail = "python sandbox requires OS-level isolation"
+        if _get_isolation_strategy() == "best-effort":
+            raise HTTPException(status_code=501, detail=isolation_detail)
         try:
-            from soup_cli.trainer.rewards import _get_isolation_strategy, _run_code_sandbox
-
-            # Same requirement as /v1/tools/bash: run only where the host
-            # provides OS-level isolation (namespaces / sandbox-exec).
-            if _get_isolation_strategy() == "best-effort":
-                raise HTTPException(
-                    status_code=501,
-                    detail="python sandbox requires OS-level isolation",
-                )
-
-            stdout = _run_code_sandbox(code)
-        except HTTPException:
-            raise
+            stdout = _run_code_sandbox(code, strict_namespaces=True)
+        except SandboxIsolationError:
+            raise HTTPException(status_code=501, detail=isolation_detail)
         except Exception as exc:  # noqa: BLE001
             logger.debug("/v1/tools/python sandbox error: %s", exc)
             raise HTTPException(status_code=500, detail="Internal server error")

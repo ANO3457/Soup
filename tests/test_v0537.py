@@ -898,15 +898,21 @@ def _create_test_app(host: str = "127.0.0.1", auth_token: str | None = None, **k
 
 
 def _allow_live_python_tool(monkeypatch) -> None:
-    """Let a live /v1/tools/python run proceed on a host without OS isolation.
+    """Let a live /v1/tools/python run proceed whatever this host's isolation.
 
     The route answers 501 under the ``best-effort`` isolation strategy (Windows,
-    Linux without ``os.unshare``); these tests exercise the live sandbox run.
+    Linux without ``os.unshare``) and when the namespace ``unshare`` fails at run
+    time (a kernel or container that refuses unprivileged user namespaces).
+    These tests exercise the live sandbox run, not the isolation, so the
+    ``unshare`` the sandbox child calls is a no-op that succeeds.
     """
+    import os
+
     from soup_cli.trainer import rewards
 
     if rewards._get_isolation_strategy() == "best-effort":
         monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "namespaces")
+    monkeypatch.setattr(os, "unshare", lambda *args, **kwargs: None, raising=False)
 
 
 class TestToolEndpointsLive:
