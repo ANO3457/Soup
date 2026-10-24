@@ -134,6 +134,22 @@ class TestNoTokenConfigured:
         assert resp.json()["detail"] == TOKEN_REQUIRED
 
     @pytest.mark.parametrize(("path", "body"), CODE_ROUTES, ids=CODE_ROUTE_IDS)
+    def test_the_token_is_checked_before_the_isolation_requirement(
+        self, path, body, sandbox_calls, monkeypatch
+    ):
+        from soup_cli.trainer import rewards
+
+        # A host without OS-level isolation answers 501 once a request is let in.
+        monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "best-effort")
+        client = TestClient(_app(), base_url="http://127.0.0.1:8000")
+
+        resp = client.post(path, json=body)
+
+        assert resp.status_code == 401, (path, resp.text)
+        assert resp.json()["detail"] == TOKEN_REQUIRED
+        assert sandbox_calls == []
+
+    @pytest.mark.parametrize(("path", "body"), CODE_ROUTES, ids=CODE_ROUTE_IDS)
     def test_the_host_check_still_answers_first(self, path, body, sandbox_calls):
         client = TestClient(_app(), base_url="http://evil.example:8000")
 

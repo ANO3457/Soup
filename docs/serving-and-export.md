@@ -1006,9 +1006,11 @@ Three POST routes are now available on `soup serve`:
 
 **`/v1/tools/python` and `/v1/tools/bash` need `--tool-auth-token` on every bind.** A
 server started without it answers both routes with 401 on loopback too, as it already did
-on any other bind, and the reply names the fix. Start the server with a token, from the
-option or from `SOUP_TOOL_AUTH_TOKEN` (which keeps it off the command line and out of the
-shell history), and send it as a Bearer header:
+on any other bind, and the reply names the fix. The token is checked before the OS-level
+isolation requirement above, so without it the reply is 401 even on a host where the route
+would answer 501; with it, the isolation rule decides. Start the server with a token, from
+the option or from `SOUP_TOOL_AUTH_TOKEN` (which keeps it off the command line and out of
+the shell history), and send it as a Bearer header:
 
 ```bash
 export SOUP_TOOL_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
