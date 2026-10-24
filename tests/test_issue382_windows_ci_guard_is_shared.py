@@ -8,10 +8,11 @@ original guard did not cover. Copying the predicate would have been the third
 time this repo shipped a duplicated source of truth (#372, #392, #424), so it
 moved to ``tests/_windows_ci.py`` and both call sites import it.
 
-These tests exist so a future copy fails loudly instead of drifting. Two files
+These tests exist so a future copy fails loudly instead of drifting. Three files
 carry the guard now: the two NF4 tests in ``test_v07202.py``, whose crash is
-the bitsandbytes wheel, and the ``cpu-bf16-autocast`` case (that case only) of
-``test_expert_stream.py``. The others traced to CPU bf16/fp16 matmuls (#1314) and
+the bitsandbytes wheel, the ``cpu-bf16-autocast`` case (that case only) of
+``test_expert_stream.py``, and the bfloat16 cases (those only) of
+``test_stream_loss_chunk.py``. The others traced to CPU bf16/fp16 matmuls (#1314) and
 request ``aten_half_matmuls`` instead (#1359). The sets are named here, in
 :data:`GUARDED_TESTS`, :data:`GUARDED_PARAMS` and :data:`FIXTURE_TESTS`, so a
 deleted decorator or a dropped fixture fails here too.
@@ -32,10 +33,11 @@ _TESTS_DIR = Path(__file__).resolve().parent
 _HOME = _TESTS_DIR / "_windows_ci.py"
 
 #: The files that gate a crashing native kernel behind the shared guard: #382
-#: (v07202, a real ``trainer.train()``) and the CPU bf16-autocast case of
-#: test_expert_stream. v05311, test_rewind_hf and test_rewind_wiring dropped it
-#: in #1359, once #1314 traced their crash to CPU half-precision matmuls.
-KNOWN_CALL_SITES = ("test_v07202.py", "test_expert_stream.py")
+#: (v07202, a real ``trainer.train()``), the CPU bf16-autocast case of
+#: test_expert_stream and the CPU bfloat16 cases of test_stream_loss_chunk. v05311,
+#: test_rewind_hf and test_rewind_wiring dropped it in #1359, once #1314 traced their
+#: crash to CPU half-precision matmuls.
+KNOWN_CALL_SITES = ("test_v07202.py", "test_expert_stream.py", "test_stream_loss_chunk.py")
 
 
 class TestThereIsExactlyOneDefinition:
@@ -132,6 +134,11 @@ GUARDED_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
         "test_streamed_experts_backward_preserves_forward_autocast": (
             "cpu-bf16-autocast",
         ),
+    },
+    "test_stream_loss_chunk.py": {
+        "test_they_equal_the_full_logits_step_within_the_tolerance": ("bf16",),
+        "test_one_chunk_is_the_full_step_exactly": ("bf16",),
+        "test_the_token_losses_give_the_rewind_logs_row_losses": ("bf16",),
     },
 }
 
@@ -237,15 +244,18 @@ def _marker_condition(platform: str, ci: str | None) -> bool:
     return namespace["skip_on_windows_ci"].args[0]
 
 
-class TestTheExpertStreamBf16SkipStaysNarrow:
-    """The skip on ``cpu-bf16-autocast`` must exclude one CI fleet, nothing more.
+class TestTheCpuBf16SkipsStayNarrow:
+    """The skips on the CPU bf16 cases must exclude one CI fleet, nothing more.
 
     Run 40003126970 (windows 3.12, PR #1855): the eager reference module's bf16
     forward under CPU autocast died with ``0xc000001d``, the xdist worker was
-    replaced and the cell timed out 45 minutes later. A skip that quietly widened
-    would remove the case from ubuntu and macos too and look exactly like a pass,
-    so both edges of the condition are pinned on the marker itself, plus which
-    parametrisations carry it.
+    replaced and the cell timed out 45 minutes later. Run 40014485149 (job
+    120622979972, this PR's own windows cell) died the same way in
+    ``test_stream_loss_chunk.py``, on the bf16 head's ``Linear.forward`` of
+    ``test_they_equal_the_full_logits_step_within_the_tolerance[16-shape0-dtype1]``.
+    A skip that quietly widened would remove the case from ubuntu and macos too and
+    look exactly like a pass, so both edges of the condition are pinned on the marker
+    itself, plus which parametrisations of each test carry it.
     """
 
     def test_it_skips_on_a_windows_runner(self):
@@ -284,6 +294,78 @@ class TestTheExpertStreamBf16SkipStaysNarrow:
                 assert marks == "skip_on_windows_ci", (case, marks)
             else:
                 assert marks is None, f"{filename}::{target}[{case}] must keep running: {marks}"
+
+
+def _bf16_sites(filename: str):
+    """Where ``torch.bfloat16`` appears in a test file, by test.
+
+    Returns ``(by_test, strays)``: ``by_test`` maps each test that lists the dtype in a
+    ``parametrize`` to one bool per occurrence, True when it is the first argument of a
+    ``pytest.param`` whose ``marks`` is exactly ``skip_on_windows_ci``; ``strays`` counts
+    the occurrences outside any ``parametrize`` decorator (a test body that builds a bf16
+    head by hand would run on every cell, marker or not).
+    """
+    tree = ast.parse((_TESTS_DIR / filename).read_text(encoding="utf-8"))
+    every = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "bfloat16"
+    ]
+    by_test: dict[str, list[bool]] = {}
+    in_parametrize = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        for decorator in func.decorator_list:
+            if not _is_call_to(decorator, "parametrize"):
+                continue
+            guarded = set()
+            for call in ast.walk(decorator):
+                if _is_call_to(call, "param") and call.args:
+                    marks = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}.get("marks")
+                    if marks == "skip_on_windows_ci":
+                        guarded.add(id(call.args[0]))
+            for node in ast.walk(decorator):
+                if isinstance(node, ast.Attribute) and node.attr == "bfloat16":
+                    in_parametrize.add(id(node))
+                    by_test.setdefault(func.name, []).append(id(node) in guarded)
+    strays = sum(1 for node in every if id(node) not in in_parametrize)
+    return by_test, strays
+
+
+class TestEveryBf16CaseOfTheLossChunkTestsIsSkippedOnWindowsCI:
+    """Run 40014485149 died on the first bf16 case, and every other one is the same matmul.
+
+    ``GUARDED_PARAMS`` pins the ids that carry the marker on the three tests that list
+    bfloat16 today. This reads the file the other way round, so that a FOURTH test with a
+    bfloat16 parameter, or a bf16 head built inside a test body, cannot arrive unguarded
+    and bring the Windows cell down again.
+    """
+
+    FILE = "test_stream_loss_chunk.py"
+
+    def test_each_bfloat16_parameter_carries_the_marker(self):
+        by_test, _ = _bf16_sites(self.FILE)
+        unguarded = {name: flags for name, flags in by_test.items() if not all(flags)}
+        assert not unguarded, (
+            f"{self.FILE}: a bfloat16 parameter without marks=skip_on_windows_ci runs a "
+            f"CPU bf16 matmul on every Windows CI runner (#382): {unguarded}"
+        )
+
+    def test_exactly_the_pinned_tests_list_bfloat16(self):
+        by_test, _ = _bf16_sites(self.FILE)
+        assert set(by_test) == set(GUARDED_PARAMS[self.FILE]), (
+            f"{self.FILE}: tests with a bfloat16 parameter {sorted(by_test)} differ from the "
+            f"pinned {sorted(GUARDED_PARAMS[self.FILE])}; add the new one to GUARDED_PARAMS"
+        )
+        assert all(len(flags) == 1 for flags in by_test.values()), by_test
+
+    def test_no_bfloat16_outside_a_parametrize(self):
+        _, strays = _bf16_sites(self.FILE)
+        assert strays == 0, (
+            f"{self.FILE}: {strays} torch.bfloat16 outside a parametrize runs unguarded; "
+            f"parametrize it with pytest.param(..., id=..., marks=skip_on_windows_ci)"
+        )
 
 
 class TestTheHalfPrecisionTestsRequestTheFixture:
