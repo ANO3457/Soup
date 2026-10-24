@@ -35,6 +35,8 @@ TOKEN = "s3cret-token"
 
 
 def _client(**kwargs) -> TestClient:
+    # /v1/tools/python and /v1/tools/bash answer 401 without a token on every bind
+    # (tests/test_serve_code_tool_token.py), so the app has one and the client sends it.
     from soup_cli.commands.serve import _create_app
 
     base = dict(
@@ -43,9 +45,14 @@ def _client(**kwargs) -> TestClient:
         device="cpu",
         model_name="test-model",
         max_tokens_default=128,
+        auth_token=TOKEN,
     )
     base.update(kwargs)
-    return TestClient(_create_app(**base), base_url="http://127.0.0.1")
+    return TestClient(
+        _create_app(**base),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
 
 
 @pytest.fixture
