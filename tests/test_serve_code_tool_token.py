@@ -6,8 +6,9 @@ with ``--tool-auth-token`` (or ``SOUP_TOOL_AUTH_TOKEN``) and the request sends
 on a loopback bind too. ``/v1/tools/web_search``, ``/v1/thumbs`` and the adapter routes
 keep their rule: a token only when one is configured.
 
-The token check comes after the Host/Origin check and before the body is read or a
-sandbox starts, so a refused request runs nothing.
+The token check comes after the Host/Origin check and before the request's content is
+used or a sandbox starts, so a refused request runs nothing. An empty token, from the
+option, the environment or ``_create_app``, counts as no token.
 """
 
 from __future__ import annotations
@@ -124,8 +125,23 @@ class TestNoTokenConfigured:
         assert resp.json()["detail"] == TOKEN_REQUIRED
         assert sandbox_calls == []
 
+    @pytest.mark.parametrize(
+        "header",
+        [None, AUTH, {"Authorization": "Bearer"}],
+        ids=["no-header", "bearer", "empty-bearer"],
+    )
+    @pytest.mark.parametrize(("path", "body"), CODE_ROUTES, ids=CODE_ROUTE_IDS)
+    def test_an_empty_token_is_no_token(self, header, path, body, sandbox_calls):
+        client = TestClient(_app(auth_token=""), base_url="http://127.0.0.1:8000")
+
+        resp = client.post(path, json=body, headers=header)
+
+        assert resp.status_code == 401, (path, resp.text)
+        assert resp.json()["detail"] == TOKEN_REQUIRED
+        assert sandbox_calls == []
+
     @pytest.mark.parametrize(("path", "_body"), CODE_ROUTES, ids=CODE_ROUTE_IDS)
-    def test_the_token_is_checked_before_the_body(self, path, _body, sandbox_calls):
+    def test_the_token_is_checked_before_the_body_content(self, path, _body, sandbox_calls):
         client = TestClient(_app(), base_url="http://127.0.0.1:8000")
 
         resp = client.post(path, json={})
@@ -255,6 +271,25 @@ class TestCommandLine:
         assert "requires --tool-auth-token" not in out, out
         assert "Note: bound to '0.0.0.0', not loopback" in out, out
         assert "env-token-value-123" not in out
+
+    @pytest.mark.parametrize(
+        ("env", "option"),
+        [("", []), (None, ["--tool-auth-token", ""])],
+        ids=["empty-env-var", "empty-option"],
+    )
+    def test_an_empty_token_is_no_token_at_start(self, env, option, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "400")
+        if env is not None:
+            monkeypatch.setenv("SOUP_TOOL_AUTH_TOKEN", env)
+
+        result = runner.invoke(
+            cli_app, ["serve", "--model", "no-such-model-dir", "--host", "0.0.0.0", *option]
+        )
+
+        assert result.exit_code == 2, (result.output, repr(result.exception))
+        out = _plain(result.output)
+        assert "binding non-loopback host '0.0.0.0' requires --tool-auth-token <secret>" in out
+        assert "Note: bound to" not in out
 
     def test_without_the_env_var_a_non_loopback_bind_is_still_refused(self, monkeypatch):
         monkeypatch.setenv("COLUMNS", "400")
