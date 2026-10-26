@@ -605,8 +605,9 @@ Submission starts Python in isolated mode (`-I`) and passes
 only the RunPod token/key path, `PATH`, `HOME`, `USERPROFILE`, proxy settings
 (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms),
 temporary-directory settings (`TEMP`, `TMP`, `TMPDIR`), Windows settings
-(`SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `PATHEXT`, `NoDefaultCurrentDirectoryInExePath`)
-and `SSH_AUTH_SOCK` when present. Environment names are matched case-insensitively on Windows. The controller
+(`SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `PATHEXT`, `NoDefaultCurrentDirectoryInExePath`; on
+Windows `soup` sets the last to 1 when it is not set, and the controller sets it to 1 for `ssh`
+and `scp`) and `SSH_AUTH_SOCK` when present. Environment names are matched case-insensitively on Windows. The controller
 reconfigures stdout/stderr to replace characters the pipe encoding cannot represent,
 because isolated Python ignores `PYTHONIOENCODING` and `PYTHONUTF8`.
 SSH/SCP use `IdentitiesOnly=yes` with the selected key and a temporary per-run known-hosts
@@ -1100,7 +1101,10 @@ or in such an entry is not found: put the program's directory on `PATH` as an ab
 On Windows `soup` also sets `NoDefaultCurrentDirectoryInExePath=1` for itself when it is not
 set, so a program started by bare name by Soup's libraries or by a program Soup starts (an eval
 or reward script included) is not looked for in the current directory either, as on Linux and
-macOS: give its path (`.\tool.exe`) or put its directory on `PATH`.
+macOS. A value already set is kept, and Windows leaves the current directory out for any
+non-empty value, `0` included, so no setting brings the old search back: to run a program from
+the current directory, give its path (`.\tool.exe`) or put the directory on `PATH` as an absolute
+path.
 
 
 ## Experiment Tracking

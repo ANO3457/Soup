@@ -910,7 +910,7 @@ closed allowlist / filtered-env rules as the other `soup llama` subcommands). Us
 it when you already have a GGUF and want llama.cpp's quantizer directly, rather
 than going through `soup export --format gguf` / `soup quantize`.
 
-Closed allowlist: `cli` / `mtmd-cli` / `gguf-split` / `server` / `quantize`. Forwards to the `llama-*` binary found in an absolute `PATH` directory (empty and relative entries and the current directory are not searched) with a **filtered child env** — `HF_TOKEN` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` and other secrets are dropped before exec; only `PATH` / `PATHEXT` / `SYSTEMROOT` / `NoDefaultCurrentDirectoryInExePath`, `HOME` / `USER` / `USERPROFILE` / `TMP` / `TEMP`, locale (`LANG` / `LC_ALL` / `LC_CTYPE`), `TERM` / `COLORTERM` and the llama.cpp-recognised `LLAMA_CPP_HOME` / `GGML_CUDA` / `GGML_METAL` / `OMP_NUM_THREADS` are forwarded. Names are matched without regard to case on Windows.
+Closed allowlist: `cli` / `mtmd-cli` / `gguf-split` / `server` / `quantize`. Forwards to the `llama-*` binary found in an absolute `PATH` directory (empty and relative entries and the current directory are not searched) with a **filtered child env** — `HF_TOKEN` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` and other secrets are dropped before exec; only `PATH` / `PATHEXT` / `SYSTEMROOT` / `NoDefaultCurrentDirectoryInExePath` (on Windows set to 1 for the child, whatever the parent has), `HOME` / `USER` / `USERPROFILE` / `TMP` / `TEMP`, locale (`LANG` / `LC_ALL` / `LC_CTYPE`), `TERM` / `COLORTERM` and the llama.cpp-recognised `LLAMA_CPP_HOME` / `GGML_CUDA` / `GGML_METAL` / `OMP_NUM_THREADS` are forwarded. Names are matched without regard to case on Windows.
 
 
 ## Tail-Latency Stats + Tool-Call Timer
