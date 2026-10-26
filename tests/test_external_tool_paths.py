@@ -1103,11 +1103,11 @@ class TestTheMultiGpuLauncher:
 
 
 class TestAdapterBisectEvalCommand:
-    def _invoke(self, eval_command: str):
+    def _invoke(self, eval_command: str, history: tuple[str, ...] = ("ckpt-1", "ckpt-2")):
         from soup_cli.cli import app
 
         return CliRunner().invoke(
-            app, ["adapters", "bisect", "ckpt-1", "ckpt-2", "--eval-command", eval_command]
+            app, ["adapters", "bisect", *history, "--eval-command", eval_command]
         )
 
     def test_a_bare_program_name_runs_by_absolute_path(self, tools, monkeypatch):
@@ -1140,7 +1140,49 @@ class TestAdapterBisectEvalCommand:
         result = self._invoke("soup-eval-probe --model {ckpt}")
 
         assert result.exit_code == 2, (result.output, repr(result.exception))
-        assert "--eval-command program 'soup-eval-probe' was not found on PATH" in _plain(
-            result.output
-        )
+        output = _plain(result.output)
+        assert output.startswith(
+            "--eval-command program 'soup-eval-probe' was not found on PATH"
+        ), output
+        # Refused before the bisect starts: no probe ran and no verdict was given.
+        assert "Eval failed" not in output
+        assert "Adapter bisect" not in output
         assert not run.calls
+
+    @pytest.mark.parametrize(
+        ("template", "program"), [("{ckpt}", "{}"), ("{ckpt}x --model m", "{}x")]
+    )
+    def test_a_program_named_by_the_checkpoint_id_runs_by_absolute_path(
+        self, tools, monkeypatch, template, program
+    ):
+        history = ("soup-eval-a", "soup-eval-b")
+        expected = [tools(program.format(ckpt)) for ckpt in history]
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = self._invoke(template, history)
+
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert len(run.argv0) == len(expected)
+        assert all(_same(argv0, path) for argv0, path in zip(run.argv0, expected))
+
+    def test_a_program_named_by_the_checkpoint_id_that_is_not_on_path_is_not_started(
+        self, tools, monkeypatch
+    ):
+        history = ("soup-eval-a", "soup-eval-b")
+        for ckpt in history:
+            _program(tools.project, ckpt)
+            _program(tools.project / "rel", ckpt)
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = self._invoke("{ckpt} --model m", history)
+
+        assert not run.calls
+        output = _plain(result.output)
+        assert (
+            "Eval failed for soup-eval-a: --eval-command program 'soup-eval-a' was not "
+            "found on PATH" in output
+        )
+        assert "BROKEN_AT" in output
+        assert result.exit_code == 2, (result.output, repr(result.exception))
