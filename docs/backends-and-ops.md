@@ -26,6 +26,7 @@
 - [Error Handling](#error-handling)
 - [Unknown config keys](#unknown-config-keys)
 - [Config size limits](#config-size-limits)
+- [External programs](#external-programs)
 - [Experiment Tracking](#experiment-tracking)
 - [Profiling Extras](#profiling-extras)
 - [VS Code Setup (`.vscode/launch.json`)](#vs-code-setup-vscodelaunchjson)
@@ -598,6 +599,8 @@ removes that directory when nothing was written to it; otherwise the failure not
 names it, with the partial copy inside. `ssh` and `scp` run by the
 absolute path found in an absolute `PATH` entry (the current directory and relative
 entries are not searched), with the controller's environment minus `RUNPOD_API_KEY`.
+When either is missing, the controller prints "OpenSSH ssh and scp must be installed
+and on PATH before RunPod submission." and exits 2 before creating a Pod.
 Submission starts Python in isolated mode (`-I`) and passes
 only the RunPod token/key path, `PATH`, `HOME`, `USERPROFILE`, proxy settings
 (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms),
@@ -667,9 +670,14 @@ export LAMBDA_REGION=us-tx-1  # optional; defaults to us-tx-1
 soup train --config soup.yaml --cloud lambda --gpu a100 --cloud-submit
 ```
 
-`--gpu` accepts: `a10` / `a100` / `a6000` / `h100`. Lambda output paths must be relative so the
-controller can copy the artifact back safely. The API key stays on the caller and is never embedded
-in cloud-init or instance logs.
+`--gpu` accepts: `a10` / `a100` / `a6000` / `h100`. Lambda output paths must be relative, without
+`..` and without a path part starting with `-`, so the controller can copy the artifact back
+safely; planning refuses any other output path. SCP separates options from its operands with `--`.
+`ssh` and `scp` run by the absolute path found in an absolute `PATH` entry (the current directory
+and relative entries are not searched), with the controller's environment minus `LAMBDA_API_KEY`.
+When either is missing, the controller prints "OpenSSH ssh and scp must be installed and on PATH
+before Lambda submission." and exits 2 before launching an instance. The API key stays on the
+caller and is never embedded in cloud-init or instance logs.
 
 The Lambda submission path still requires the paid live-validation checklist in #1280 before
 it can be described as provider-validated. Plan-only rendering and the lifecycle boundaries are
@@ -1078,6 +1086,17 @@ identical, so there is no partially-useful result to preserve by continuing.
 A config file may be at most 1 MiB, nest mappings and lists at most 100 levels,
 and expand through anchors, aliases and `<<` merge keys to at most one node per byte plus 10,000.
 A file over a limit is refused with a message naming the file and the limit (`soup ship`: 4 MiB).
+
+
+## External programs
+
+Soup starts the external programs it uses (`nvidia-smi`, `git`, `docker`, `ollama`, `gh`, the
+Modal CLI, `trtllm-build`, the llama.cpp binaries, `accelerate` for `soup train --gpus`, the
+`soup adapters bisect --eval-command` program, and `ssh` / `scp` in the RunPod and Lambda
+controllers) by the absolute path found in an absolute `PATH` directory, searching the directories
+in order. Empty and relative `PATH` entries (`.`, `bin`, and on Windows `\bin` or `C:bin`) are not
+searched, and neither is the current directory. A program that is only in the current directory
+or in such an entry is not found: put the program's directory on `PATH` as an absolute path.
 
 
 ## Experiment Tracking
