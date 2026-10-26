@@ -93,7 +93,7 @@ Before the first run of an existing config on 0.77.0, run `soup doctor --config 
   log-probs from the trainer's own forward pass and the reference log-probs from the trainer's
   `compute_ref_log_probs`; the `ipo` term divides each log-ratio by its response length, as trl's
   IPO loss does, so it is the loss `task: ipo` trains. The reference is run twice per step. A `dpo`
-  or `ipo` term under a `simpo` / `orpo` primary trains too (next entry, #1828); with full
+  or `ipo` term under a `simpo` / `orpo` primary trains too (see #1828 below); with full
   fine-tuning (no LoRA adapter to switch off) it still stops at the first step, and the message
   says why (those trainers run no reference) and what to do (give `dpo` or `ipo` the largest
   weight). Try: `soup train --config soup.yaml` with `task: preference` and
