@@ -1097,6 +1097,10 @@ controllers) by the absolute path found in an absolute `PATH` directory, searchi
 in order. Empty and relative `PATH` entries (`.`, `bin`, and on Windows `\bin` or `C:bin`) are not
 searched, and neither is the current directory. A program that is only in the current directory
 or in such an entry is not found: put the program's directory on `PATH` as an absolute path.
+On Windows `soup` also sets `NoDefaultCurrentDirectoryInExePath=1` for itself when it is not
+set, so a program started by bare name by Soup's libraries or by a program Soup starts (an eval
+or reward script included) is not looked for in the current directory either, as on Linux and
+macOS: give its path (`.\tool.exe`) or put its directory on `PATH`.
 
 
 ## Experiment Tracking
