@@ -672,3 +672,151 @@ class TestSystemToolsWithAFixedLocation:
 
         assert doctor._get_ram_gb() == "16 GB"
         assert run.argv0 == ["/usr/sbin/sysctl"]
+
+
+class TestOllama:
+    @pytest.mark.parametrize("call", ["detect", "deploy", "list", "remove"])
+    def test_every_ollama_call_runs_it_by_absolute_path(self, tools, monkeypatch, call):
+        from soup_cli.utils import ollama
+
+        expected = tools("ollama")
+        run = _Recorder(stdout="ollama version is 0.6.2\n")
+        monkeypatch.setattr(ollama.subprocess, "run", run)
+
+        {
+            "detect": lambda: ollama.detect_ollama(),
+            "deploy": lambda: ollama.deploy_to_ollama("soup-test", "FROM x.gguf\n"),
+            "list": lambda: ollama.list_soup_models(),
+            "remove": lambda: ollama.remove_model("soup-test"),
+        }[call]()
+
+        assert len(run.calls) == 1
+        assert _same(run.argv0[0], expected)
+
+    def test_a_missing_ollama_keeps_its_messages(self, no_tools, monkeypatch):
+        from soup_cli.utils import ollama
+
+        run = _Recorder()
+        monkeypatch.setattr(ollama.subprocess, "run", run)
+
+        assert ollama.detect_ollama() is None
+        assert ollama.deploy_to_ollama("soup-test", "FROM x.gguf\n") == (
+            False, "Ollama not found. Install from https://ollama.com"
+        )
+        assert ollama.list_soup_models() == []
+        assert ollama.remove_model("soup-test") == (
+            False, "Ollama not found. Install from https://ollama.com"
+        )
+        assert not run.calls
+
+
+class TestLlamaCpp:
+    def test_the_llama_proxy_resolves_the_absolute_copy(self, tools):
+        from soup_cli.utils.llama_proxy import build_argv, resolve
+
+        expected = tools("llama-cli")
+
+        argv = build_argv(resolve("cli", ["--help"]))
+
+        assert _same(argv[0], os.path.realpath(expected))
+
+    def test_the_llama_proxy_refuses_a_binary_that_is_only_in_the_current_directory(
+        self, tools
+    ):
+        from soup_cli.utils.llama_proxy import resolve
+
+        _program(tools.project, "llama-server")
+
+        with pytest.raises(FileNotFoundError, match="llama-server not found on PATH"):
+            resolve("server", [])
+
+    def test_export_finds_llama_quantize_on_path_by_absolute_path(self, tools, tmp_path):
+        from soup_cli.commands.export import _find_quantize_binary
+
+        expected = tools("llama-quantize")
+        checkout = tmp_path / "llama.cpp"
+        checkout.mkdir()
+
+        assert _same(_find_quantize_binary(checkout), expected)
+
+    def test_export_clones_llama_cpp_with_the_absolute_git(self, tools, tmp_path, monkeypatch):
+        from soup_cli.commands import export
+
+        git = tools("git")
+        monkeypatch.setattr(export, "_existing_llama_cpp", lambda user_path=None: None)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        run = _Recorder()
+        monkeypatch.setattr(export.subprocess, "run", run)
+
+        export._find_llama_cpp()
+
+        assert _same(run.argv0[0], git)
+
+    def test_export_without_git_keeps_its_message(self, no_tools, tmp_path, monkeypatch, capsys):
+        import typer
+        from rich.console import Console
+
+        from soup_cli.commands import export
+
+        monkeypatch.setattr(export, "_existing_llama_cpp", lambda user_path=None: None)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(export, "console", Console(force_terminal=False, width=200))
+        run = _Recorder()
+        monkeypatch.setattr(export.subprocess, "run", run)
+
+        with pytest.raises(typer.Exit):
+            export._find_llama_cpp()
+
+        assert "git not found." in _plain(capsys.readouterr().out)
+        assert not run.calls
+
+    def test_the_child_environment_keeps_the_program_search_variables(self, monkeypatch):
+        from soup_cli.commands.llama import _filtered_env
+
+        _with_the_four(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "hf-secret")
+
+        env = _filtered_env()
+
+        assert _folded(env) >= {name.upper() for name in _FOUR}
+        assert "HF_TOKEN" not in _folded(env)
+
+
+class TestTensorRT:
+    def _export(self, tmp_path, monkeypatch, run):
+        from rich.console import Console
+
+        from soup_cli.commands import export
+
+        for name in (
+            "tensorrt_llm", "tensorrt_llm.commands", "tensorrt_llm.commands.convert_checkpoint"
+        ):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(export, "console", Console(force_terminal=False, width=200))
+        monkeypatch.setattr(export.subprocess, "run", run)
+        return export._export_tensorrt(model, str(tmp_path / "out"), None)
+
+    def test_trtllm_build_runs_by_absolute_path(self, tools, tmp_path, monkeypatch):
+        expected = tools("trtllm-build")
+        run = _Recorder()
+
+        self._export(tmp_path, monkeypatch, run)
+
+        assert run.argv0[0] == sys.executable
+        assert _same(run.argv0[1], expected)
+
+    def test_a_missing_trtllm_build_keeps_its_message(
+        self, no_tools, tmp_path, monkeypatch, capsys
+    ):
+        import typer
+
+        run = _Recorder()
+
+        with pytest.raises(typer.Exit):
+            self._export(tmp_path, monkeypatch, run)
+
+        assert "trtllm-build not found in PATH." in _plain(capsys.readouterr().out)
+        assert run.argv0 == [sys.executable]
