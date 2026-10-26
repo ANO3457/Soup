@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -525,3 +526,149 @@ class TestTheLambdaControllerRunsSshAndScpByAbsolutePath:
         assert "OpenSSH ssh and scp must be installed and on PATH" in " ".join(printed)
         assert not run.calls
         assert not any("launched" in line for line in printed)
+
+
+# ---------------------------------------------------------------------------
+# Every place Soup starts an external program
+# ---------------------------------------------------------------------------
+
+
+class TestNvidiaSmi:
+    def test_doctor_runs_nvidia_smi_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.commands import doctor
+
+        smi = tools("nvidia-smi")
+        run = _Recorder(returncode=1)
+        monkeypatch.setattr(subprocess, "run", run)
+
+        doctor._nvidia_smi_cuda_version()
+        doctor._detect_gpu_hw_without_torch_cuda()
+
+        assert len(run.calls) == 2
+        assert all(_same(argv0, smi) for argv0 in run.argv0)
+
+    def test_doctor_reports_no_nvidia_smi_when_none_is_on_path(self, no_tools, monkeypatch):
+        from soup_cli.commands import doctor
+
+        monkeypatch.setattr(subprocess, "run", _Recorder())
+
+        assert doctor._nvidia_smi_executable() is None
+        assert doctor._nvidia_smi_cuda_version() is None
+        assert doctor._detect_gpu_hw_without_torch_cuda() == ""
+
+    def test_the_gpu_monitor_runs_nvidia_smi_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.utils import gpu_monitor
+
+        smi = tools("nvidia-smi")
+        run = _Recorder(stdout="")
+        monkeypatch.setattr(gpu_monitor.subprocess, "run", run)
+
+        gpu_monitor.query_nvidia_smi()
+
+        assert len(run.calls) == 1
+        assert _same(run.argv0[0], smi)
+
+    def test_the_sm_clock_probe_runs_nvidia_smi_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.utils.layer_stream_runtime import sm_clock_mhz
+
+        smi = tools("nvidia-smi")
+        run = _Recorder(stdout="1500\n")
+        monkeypatch.setattr(subprocess, "run", run)
+
+        assert sm_clock_mhz() == 1500
+        assert _same(run.argv0[0], smi)
+
+    def test_bench_train_runs_nvidia_smi_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.bench import train_run
+
+        smi = tools("nvidia-smi")
+        run = _Recorder(stdout="595.12\n")
+        monkeypatch.setattr(subprocess, "run", run)
+
+        assert train_run._driver_version() == "595.12"
+        sampler = train_run.ClockSampler()
+        assert sampler.available
+        sampler._read()
+
+        assert len(run.calls) == 2
+        assert all(_same(argv0, smi) for argv0 in run.argv0)
+
+
+class TestSystemToolsWithAFixedLocation:
+    def test_a_fixed_location_wins_over_a_copy_on_path(self, tools, tmp_path):
+        from soup_cli.utils.layer_stream import _resolve_tool
+
+        tools("soup-probe-tool")
+        fixed = _program(tmp_path / "system", "soup-probe-tool")
+
+        assert _same(_resolve_tool("soup-probe-tool", str(fixed)), fixed)
+
+    def test_path_is_searched_when_the_fixed_location_is_missing(self, tools, tmp_path):
+        from soup_cli.utils.layer_stream import _resolve_tool
+
+        expected = tools("soup-probe-tool")
+
+        assert _same(_resolve_tool("soup-probe-tool", str(tmp_path / "missing")), expected)
+        assert _same(_resolve_tool("soup-probe-tool"), expected)
+
+    def test_windows_powershell_runs_from_its_fixed_location(self, tools, tmp_path, monkeypatch):
+        import platform
+
+        from soup_cli.utils import layer_stream
+
+        tools("powershell")
+        fixed = _program(tmp_path / "System32", "powershell")
+        monkeypatch.setattr(layer_stream, "_WINDOWS_POWERSHELL", str(fixed))
+        monkeypatch.setattr(platform, "system", lambda: "Windows")
+        run = _Recorder(stdout="")
+        monkeypatch.setattr(subprocess, "run", run)
+
+        layer_stream._probe_disk_kind(str(tmp_path))
+
+        assert _same(run.argv0[0], fixed)
+
+    def test_macos_diskutil_found_on_path_runs_by_absolute_path(self, tools, tmp_path, monkeypatch):
+        import platform
+
+        from soup_cli.utils import layer_stream
+
+        diskutil = tools("diskutil")
+        monkeypatch.setattr(layer_stream, "_MACOS_DISKUTIL", str(tmp_path / "no-diskutil"))
+        monkeypatch.setattr(platform, "system", lambda: "Darwin")
+        run = _Recorder(returncode=1)
+        monkeypatch.setattr(subprocess, "run", run)
+
+        layer_stream._probe_disk_kind(str(tmp_path))
+
+        assert run.calls
+        assert _same(run.argv0[0], diskutil)
+
+    @pytest.mark.parametrize("probe", ["chip", "memory"])
+    def test_mlx_reads_sysctl_from_its_fixed_location(self, tools, monkeypatch, probe):
+        from soup_cli.utils import mlx
+
+        tools("sysctl")
+        monkeypatch.setattr(mlx, "is_apple_silicon", lambda: True)
+        run = _Recorder(stdout="17179869184\n")
+        monkeypatch.setattr(subprocess, "run", run)
+
+        if probe == "chip":
+            mlx.get_chip_info()
+        else:
+            assert mlx.get_unified_memory_bytes() == 17179869184
+
+        assert run.argv0 == ["/usr/sbin/sysctl"]
+
+    def test_doctor_reads_macos_memory_through_the_fixed_sysctl(self, tools, monkeypatch):
+        import platform
+
+        from soup_cli.commands import doctor
+
+        tools("sysctl")
+        monkeypatch.setitem(sys.modules, "psutil", None)
+        monkeypatch.setattr(platform, "system", lambda: "Darwin")
+        run = _Recorder(stdout=str(16 * 1024**3) + "\n")
+        monkeypatch.setattr(subprocess, "run", run)
+
+        assert doctor._get_ram_gb() == "16 GB"
+        assert run.argv0 == ["/usr/sbin/sysctl"]

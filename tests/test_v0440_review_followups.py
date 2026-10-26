@@ -38,9 +38,9 @@ from soup_cli.utils.ui_env import resolve_ui_env
 # --- gpu_monitor coverage ---------------------------------------------------
 
 def test_query_nvidia_smi_no_smi_returns_false_empty(monkeypatch):
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        "soup_cli.utils.tool_paths.find_tool", lambda _name, path=None: None
+    )
     ok, samples = query_nvidia_smi()
     assert ok is False
     assert samples == []
