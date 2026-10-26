@@ -1655,10 +1655,34 @@ def adapter_bisect(
     import shlex
     import subprocess  # noqa: S404 — argv list mode, no shell
 
+    from soup_cli.utils.tool_paths import find_tool
+
+    try:
+        program = shlex.split(eval_command)[0]
+    except ValueError as exc:
+        console.print(f"[red]Invalid --eval-command: {for_terminal(exc)}[/]")
+        raise typer.Exit(2) from exc
+    # A bare program name runs from the absolute PATH directory it is found
+    # in; a program given with its path runs as given.
+    resolved = None
+    if "{ckpt}" not in program and not os.path.dirname(program):
+        try:
+            resolved = find_tool(program)
+        except ValueError:
+            resolved = None
+        if resolved is None:
+            console.print(
+                f"[red]--eval-command program {for_terminal(repr(program))} was not found "
+                "on PATH; install it, put it on PATH, or give its path[/]"
+            )
+            raise typer.Exit(2)
+
     def _eval_fn(ckpt: str) -> bool:
         cmd_str = eval_command.replace("{ckpt}", shlex.quote(ckpt))
         # Safer: split via shlex and use argv mode (no shell interpolation).
         argv = shlex.split(cmd_str)
+        if resolved is not None:
+            argv[0] = resolved
         try:
             result = subprocess.run(  # noqa: S603
                 argv, capture_output=True, timeout=3600, check=False

@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from soup_cli.utils import tool_paths
 from soup_cli.utils.tool_paths import (
@@ -922,3 +923,170 @@ class TestGitHubCli:
         env = run.calls[0][1]["env"]
         assert _folded(env) >= {name.upper() for name in _FOUR}
         assert "OPENAI_API_KEY" not in _folded(env)
+
+
+class TestTheCodeSandbox:
+    def _reset(self, rewards, monkeypatch):
+        monkeypatch.setattr(rewards, "_ISOLATION_STRATEGY_CACHE", None)
+
+    def test_macos_sandbox_exec_is_probed_at_its_fixed_location(self, tmp_path, monkeypatch):
+        from soup_cli.trainer import rewards
+
+        self._reset(rewards, monkeypatch)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(rewards, "_MACOS_SANDBOX_EXEC", str(tmp_path / "missing"))
+        assert rewards._compute_isolation_strategy() == "best-effort"
+
+        fixed = _program(tmp_path / "usr-bin", "sandbox-exec", suffix="")
+        monkeypatch.setattr(rewards, "_MACOS_SANDBOX_EXEC", str(fixed))
+        assert rewards._compute_isolation_strategy() == "sandbox-exec"
+
+    def test_macos_sandbox_exec_runs_from_its_fixed_location(self, tools, monkeypatch):
+        from soup_cli.trainer import rewards
+
+        tools("sandbox-exec")
+        # Copies named as macOS names programs, too (``sys.platform`` says darwin).
+        for directory in (tools.project, tools.project / "rel", tools.installed):
+            _program(directory, "sandbox-exec", suffix="")
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "sandbox-exec")
+        started: list[list[str]] = []
+
+        def popen(argv, **kwargs):
+            started.append(list(argv))
+            raise OSError("not started in this test")
+
+        monkeypatch.setattr(rewards.subprocess, "Popen", popen)
+
+        result = rewards._run_sandboxed_subprocess([sys.executable, "-c", "pass"])
+
+        assert result.launch_failed
+        assert started[0][0] == rewards._MACOS_SANDBOX_EXEC == "/usr/bin/sandbox-exec"
+
+    @posix_only
+    def test_the_bash_tool_runs_bash_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.trainer import rewards
+
+        bash = tools("bash")
+        monkeypatch.setattr(rewards, "_get_isolation_strategy", lambda: "namespaces")
+        monkeypatch.setattr(rewards, "_show_code_exec_warning_once", lambda: None)
+        started: list[list[str]] = []
+
+        def popen(argv, **kwargs):
+            started.append(list(argv))
+            raise OSError("not started in this test")
+
+        monkeypatch.setattr(rewards.subprocess, "Popen", popen)
+
+        with pytest.raises(PermissionError):
+            rewards._run_bash_sandbox("echo hi")
+
+        assert _same(started[0][0], bash)
+
+    def test_the_child_environment_keeps_the_program_search_variables(self, monkeypatch):
+        from soup_cli.trainer.rewards import _get_safe_sandbox_env
+
+        _with_the_four(monkeypatch)
+
+        assert _folded(_get_safe_sandbox_env()) >= {name.upper() for name in _FOUR}
+
+
+class TestTheMultiGpuLauncher:
+    def test_windows_starts_accelerate_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.utils import launcher
+
+        expected = tools("accelerate")
+        monkeypatch.setattr(launcher, "_IS_WINDOWS", True)
+        started: list[list[str]] = []
+
+        class _Process:
+            def __init__(self, argv, *args, **kwargs):
+                started.append(list(argv))
+
+            def wait(self):
+                return 0
+
+        monkeypatch.setattr(subprocess, "Popen", _Process)
+
+        assert launcher.run_launcher(["accelerate", "launch", "--num_processes", "2"]) == 0
+        assert _same(started[0][0], expected)
+        assert started[0][1:] == ["launch", "--num_processes", "2"]
+
+    def test_posix_execs_accelerate_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.utils import launcher
+
+        expected = tools("accelerate")
+        monkeypatch.setattr(launcher, "_IS_WINDOWS", False)
+        calls: list[tuple[str, list[str]]] = []
+
+        def execv(path, argv):
+            calls.append((path, list(argv)))
+            raise SystemExit(0)  # a real exec does not return
+
+        monkeypatch.setattr(os, "execv", execv)
+        monkeypatch.setattr(os, "execvp", lambda *a: pytest.fail("PATH search by exec"))
+
+        with pytest.raises(SystemExit):
+            launcher.run_launcher(["accelerate", "launch"])
+
+        assert _same(calls[0][0], expected)
+        assert calls[0][1] == ["accelerate", "launch"]
+
+    @pytest.mark.parametrize("windows", [True, False])
+    def test_a_launcher_only_in_the_current_directory_is_not_started(
+        self, tools, monkeypatch, windows
+    ):
+        from soup_cli.utils import launcher
+
+        _program(tools.project, "accelerate")
+        monkeypatch.setattr(launcher, "_IS_WINDOWS", windows)
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("started"))
+        monkeypatch.setattr(os, "execv", lambda *a: pytest.fail("exec'd"))
+        monkeypatch.setattr(os, "execvp", lambda *a: pytest.fail("exec'd"))
+
+        with pytest.raises(FileNotFoundError, match="launcher not found on PATH"):
+            launcher.run_launcher(["accelerate", "launch"])
+
+
+class TestAdapterBisectEvalCommand:
+    def _invoke(self, eval_command: str):
+        from soup_cli.cli import app
+
+        return CliRunner().invoke(
+            app, ["adapters", "bisect", "ckpt-1", "ckpt-2", "--eval-command", eval_command]
+        )
+
+    def test_a_bare_program_name_runs_by_absolute_path(self, tools, monkeypatch):
+        expected = tools("soup-eval-probe")
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = self._invoke("soup-eval-probe --model {ckpt}")
+
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert run.calls
+        assert all(_same(argv0, expected) for argv0 in run.argv0)
+        assert run.calls[0][0][1] == "--model"
+
+    def test_a_program_given_with_its_path_runs_as_given(self, tools, monkeypatch):
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = self._invoke(f'"{Path(sys.executable).as_posix()}" -c pass {{ckpt}}')
+
+        assert result.exit_code == 0, (result.output, repr(result.exception))
+        assert run.calls
+        assert all(_same(argv0, Path(sys.executable).as_posix()) for argv0 in run.argv0)
+
+    def test_a_program_that_is_not_on_path_is_refused_by_name(self, tools, monkeypatch):
+        _program(tools.project, "soup-eval-probe")
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = self._invoke("soup-eval-probe --model {ckpt}")
+
+        assert result.exit_code == 2, (result.output, repr(result.exception))
+        assert "--eval-command program 'soup-eval-probe' was not found on PATH" in _plain(
+            result.output
+        )
+        assert not run.calls
