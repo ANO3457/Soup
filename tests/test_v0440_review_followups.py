@@ -306,9 +306,9 @@ def test_discover_weight_files_non_string_rejected():
 # --- llama_proxy ------------------------------------------------------------
 
 def test_llama_resolve_rejects_null_byte_arg(monkeypatch):
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda *_a, **_k: "/fake/llama-cli")
+    monkeypatch.setattr(
+        "soup_cli.utils.tool_paths.find_tool", lambda name, path=None: "/fake/llama-cli"
+    )
     with pytest.raises(ValueError, match="control"):
         resolve("cli", ["bad\x00arg"])
 
