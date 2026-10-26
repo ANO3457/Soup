@@ -1,9 +1,12 @@
 """External programs run by an absolute path found on PATH (utils/tool_paths.py).
 
 Covers the search itself (``find_tool``: absolute PATH entries only, in order,
-PATHEXT on Windows, the execute bit elsewhere, never the current directory) and the
+PATHEXT on Windows, the execute bit elsewhere, never the current directory), the
 child environments (a filtered one keeps PATH, PATHEXT, SYSTEMROOT and
-NoDefaultCurrentDirectoryInExePath).
+NoDefaultCurrentDirectoryInExePath), the copy carried by the generated RunPod and
+Lambda controllers, and the places Soup starts an external program: each one hands
+``subprocess`` the absolute path of the copy in the PATH directory, not a same-named
+file in the current directory or in a relative PATH entry.
 
 The ``tools`` fixture reproduces the Windows default by removing
 NoDefaultCurrentDirectoryInExePath from the test process (some shells export it).
@@ -13,10 +16,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
 
+from soup_cli.utils import tool_paths
 from soup_cli.utils.tool_paths import (
     ALWAYS_KEPT_ENV_NAMES,
     ToolNotFoundError,
@@ -366,3 +371,157 @@ def _with_the_four(monkeypatch) -> None:
     monkeypatch.setenv("PATHEXT", _PATHEXT)
     monkeypatch.setenv("SYSTEMROOT", "C:\\Windows")
     monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "1")
+
+
+# ---------------------------------------------------------------------------
+# The generated cloud controllers carry the same search
+# ---------------------------------------------------------------------------
+
+_CONFIG = "base: gpt2\ndata:\n  train: data.jsonl\noutput: ./out\n"
+
+
+def _lambda_namespace() -> dict:
+    from soup_cli.cloud.lambda_labs import render_lambda_stub
+
+    stub = render_lambda_stub(_CONFIG, gpu="a100", output_dir="./out", soup_version="0.76.0")
+    namespace: dict = {"__name__": "controller"}
+    exec(compile(stub, "soup_lambda_app.py", "exec"), namespace)
+    return namespace
+
+
+def _runpod_stub() -> str:
+    from soup_cli.cloud.runpod import render_runpod_stub
+
+    return render_runpod_stub(
+        "base: public/model\ndata: {train: public/dataset}\noutput: out\n",
+        gpu="a100",
+        output_dir="out",
+        soup_version="0.76.0",
+    )
+
+
+class TestTheGeneratedControllersCarryTheSearch:
+    @pytest.mark.parametrize("render", ["runpod", "lambda"])
+    def test_the_controller_holds_the_shared_source_and_imports_no_soup_cli(self, render):
+        from soup_cli.cloud.lambda_labs import render_lambda_stub
+
+        stub = (
+            _runpod_stub()
+            if render == "runpod"
+            else render_lambda_stub(
+                _CONFIG, gpu="a100", output_dir="./out", soup_version="0.76.0"
+            )
+        )
+
+        assert tool_paths.controller_source() in stub
+        assert not [
+            line for line in stub.splitlines()
+            if line.lstrip().startswith(("import soup_cli", "from soup_cli"))
+        ]
+
+    def test_the_runpod_template_defines_no_search_of_its_own(self):
+        template = (
+            Path(tool_paths.__file__).resolve().parents[1] / "cloud" / "_runpod_controller.py"
+        ).read_text(encoding="utf-8")
+
+        assert "def _find_tool" not in template
+        assert "def find_tool" not in template
+
+    @pytest.mark.parametrize("render", ["runpod", "lambda"])
+    def test_the_controller_finds_the_absolute_copy_only(self, tools, render):
+        expected = tools("ssh")
+        if render == "runpod":
+            namespace: dict = {"__name__": "controller"}
+            exec(compile(_runpod_stub(), "soup_runpod_app.py", "exec"), namespace)
+        else:
+            namespace = _lambda_namespace()
+
+        assert _same(namespace["_find_tool"]("ssh"), expected)
+        _program(tools.project, "scp")
+        assert namespace["_find_tool"]("scp") is None
+
+    @pytest.mark.parametrize("case_insensitive", [True, False])
+    @pytest.mark.parametrize("cloud", ["lambda_labs", "runpod"])
+    def test_the_controller_environment_keeps_the_program_search_variables(
+        self, cloud, case_insensitive
+    ):
+        import importlib
+
+        module = importlib.import_module(f"soup_cli.cloud.{cloud}")
+        environ = {name: "value" for name in _FOUR}
+
+        env = module._controller_environment(environ, case_insensitive=case_insensitive)
+
+        assert set(env) == _FOUR
+
+
+def _lambda_run(namespace: dict, run) -> tuple[int, list[str]]:
+    printed: list[str] = []
+    namespace["_request_json"] = lambda api_key, path, **kw: (
+        {"data": {"instance_ids": ["instance-1"]}} if path.endswith("/launch") else {"data": {}}
+    )
+    namespace["_wait_for_ip"] = lambda *_: "192.0.2.1"
+    namespace["_wait_for_termination"] = lambda *_: None
+    namespace["time"] = types.SimpleNamespace(sleep=lambda _s: None, monotonic=lambda: 0.0)
+    namespace["subprocess"] = types.SimpleNamespace(
+        run=run, TimeoutExpired=subprocess.TimeoutExpired
+    )
+    namespace["print"] = lambda *args, **kw: printed.append(" ".join(map(str, args)))
+    return namespace["main"](), printed
+
+
+@pytest.fixture
+def lambda_credentials(tmp_path, monkeypatch):
+    key = tmp_path / "lambda-key"
+    key.write_text("test-only", encoding="utf-8")
+    monkeypatch.setenv("LAMBDA_API_KEY", "lambda-secret")
+    monkeypatch.setenv("LAMBDA_SSH_KEY_NAME", "my-key")
+    monkeypatch.setenv("LAMBDA_SSH_PRIVATE_KEY", str(key))
+    monkeypatch.setenv("LAMBDA_REGION", "us-tx-1")
+
+
+class TestTheLambdaControllerRunsSshAndScpByAbsolutePath:
+    def test_ssh_and_scp_run_by_absolute_path_without_the_api_key(
+        self, tools, lambda_credentials
+    ):
+        ssh, scp = tools("ssh"), tools("scp")
+        namespace = _lambda_namespace()
+        run = _Recorder(stdout="0\n")
+
+        rc, printed = _lambda_run(namespace, run)
+
+        assert rc == 0, printed
+        assert {os.path.normcase(argv0) for argv0 in run.argv0} == {
+            os.path.normcase(ssh), os.path.normcase(scp)
+        }
+        for _argv, kwargs in run.calls:
+            assert "LAMBDA_API_KEY" not in _folded(kwargs["env"])
+            if _WINDOWS:
+                assert kwargs["env"]["NoDefaultCurrentDirectoryInExePath"] == "1"
+
+    def test_the_log_tail_runs_ssh_by_absolute_path(self, tools, lambda_credentials):
+        ssh = tools("ssh")
+        namespace = _lambda_namespace()
+        run = _Recorder(stdout="line\n")
+
+        namespace["subprocess"] = types.SimpleNamespace(
+            run=run, TimeoutExpired=subprocess.TimeoutExpired
+        )
+        namespace["print"] = lambda *args, **kw: None
+        namespace["_fetch_log_tail"]("192.0.2.1", "key")
+
+        assert [os.path.normcase(argv0) for argv0 in run.argv0] == [os.path.normcase(ssh)]
+        assert "LAMBDA_API_KEY" not in _folded(run.calls[0][1]["env"])
+
+    def test_missing_ssh_refuses_before_any_instance_is_launched(
+        self, no_tools, lambda_credentials
+    ):
+        namespace = _lambda_namespace()
+        run = _Recorder()
+
+        rc, printed = _lambda_run(namespace, run)
+
+        assert rc == 2
+        assert "OpenSSH ssh and scp must be installed and on PATH" in " ".join(printed)
+        assert not run.calls
+        assert not any("launched" in line for line in printed)

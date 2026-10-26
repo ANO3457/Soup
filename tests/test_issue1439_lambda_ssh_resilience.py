@@ -49,6 +49,9 @@ def _exec_controller(
 ) -> tuple[int, list]:
     namespace: dict[str, object] = {"__name__": "controller"}
     exec(stub, namespace)
+    # ssh and scp are taken as found under their own names, so the fake replies can
+    # be keyed on argv[0]; tests/test_external_tool_paths.py covers the PATH search.
+    namespace["_find_tool"] = lambda name: name
 
     terminations: list[tuple] = []
     clock = {"now": 0.0}
@@ -102,6 +105,8 @@ def _run_controller(tmp_path: Path, monkeypatch, ssh_reply, scp_reply=None):
     )
     ns: dict[str, object] = {"__name__": "controller"}
     exec(stub, ns)
+    # ssh and scp are taken as found under their own names (see _exec_controller).
+    ns["_find_tool"] = lambda name: name
     clock = {"now": 0.0}
     seen = {"ssh": 0, "scp": 0, "terminate": 0, "printed": []}
 
@@ -429,6 +434,8 @@ def _rendered_poll_command(tmp_path: Path, monkeypatch) -> str:
     )
     ns = {"__name__": "controller"}
     exec(stub, ns)
+    # ssh and scp are taken as found under their own names (see _exec_controller).
+    ns["_find_tool"] = lambda name: name
 
     def fake_run(argv, **kw):
         if argv[0] == "ssh":
