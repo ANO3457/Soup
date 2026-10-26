@@ -219,15 +219,34 @@ class TestTheSearch:
 
     @windows_only
     def test_each_pathext_extension_is_tried_in_its_order(self, tmp_path, monkeypatch):
+        # The reverse of the default order: the order comes from PATHEXT itself.
         directory = tmp_path / "bin"
-        cmd = _program(directory, "soup-probe-tool", suffix=".CMD")
+        exe = _program(directory, "soup-probe-tool", suffix=".EXE")
         monkeypatch.setenv("PATH", str(directory))
-        monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+        monkeypatch.setenv("PATHEXT", ".CMD;.EXE")
 
+        assert _same(find_tool("soup-probe-tool"), exe)
+
+        cmd = _program(directory, "soup-probe-tool", suffix=".CMD")
         assert _same(find_tool("soup-probe-tool"), cmd)
 
-        exe = _program(directory, "soup-probe-tool", suffix=".EXE")
-        assert _same(find_tool("soup-probe-tool"), exe)
+    @windows_only
+    def test_an_extension_left_out_of_pathext_is_not_tried(self, tmp_path, monkeypatch):
+        _program(tmp_path / "bin", "soup-probe-tool", suffix=".BAT")
+        monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+        monkeypatch.setenv("PATHEXT", ".EXE")
+
+        assert find_tool("soup-probe-tool") is None
+
+    @windows_only
+    def test_an_extension_outside_the_default_list_is_tried_when_pathext_names_it(
+        self, tmp_path, monkeypatch
+    ):
+        program = _program(tmp_path / "bin", "soup-probe-tool", suffix=".SOUPX")
+        monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+        monkeypatch.setenv("PATHEXT", ".EXE;.SOUPX")
+
+        assert _same(find_tool("soup-probe-tool"), program)
 
     @windows_only
     def test_the_default_extensions_apply_when_pathext_is_unset(self, tmp_path, monkeypatch):
