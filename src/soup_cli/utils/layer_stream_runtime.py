@@ -2826,9 +2826,9 @@ def sm_clock_mhz() -> Optional[int]:
 
     from soup_cli.utils.layer_stream import _resolve_tool
 
-    # Absolute path, never the bare name: on Windows CreateProcess searches the
-    # CURRENT DIRECTORY before PATH, so a planted nvidia-smi.exe in a cloned
-    # project would run instead of the real one (CWE-427).
+    # Run by the absolute path found in an absolute PATH directory, never by the
+    # bare name: on Windows a bare name is looked up in the current directory
+    # before PATH, so the nvidia-smi run would depend on where soup was started.
     tool = _resolve_tool("nvidia-smi")
     if tool is None:
         return None
