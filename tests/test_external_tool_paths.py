@@ -439,26 +439,53 @@ def _unset_for_this_test(monkeypatch, name: str) -> None:
     monkeypatch.delenv(name)
 
 
+def _values_seen_by_the_command(monkeypatch) -> list[str | None]:
+    """Run ``soup version`` through ``cli.run()`` with the command replaced, and
+    return the value of the variable each time the command was called."""
+    from soup_cli import cli
+
+    seen: list[str | None] = []
+
+    def app():
+        seen.append(os.environ.get(_NO_CWD))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "app", app)
+    monkeypatch.setattr(cli, "_emit_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_emit_telemetry", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["soup", "version"])
+
+    with pytest.raises(SystemExit):
+        cli.run()
+
+    return seen
+
+
+windows_setting_only = pytest.mark.skipif(
+    not _WINDOWS,
+    reason="NoDefaultCurrentDirectoryInExePath is read only by Windows; elsewhere soup leaves it "
+    "alone (test_soup_sets_the_variable_for_itself_on_windows checks that)",
+)
+
+
 class TestSoupLeavesTheCurrentDirectoryOutOfItsProgramSearch:
     def test_soup_sets_the_variable_for_itself_on_windows(self, monkeypatch):
-        from soup_cli import cli
-
         _unset_for_this_test(monkeypatch, _NO_CWD)
-        seen: list[str | None] = []
 
-        def app():
-            seen.append(os.environ.get(_NO_CWD))
-            raise SystemExit(0)
-
-        monkeypatch.setattr(cli, "app", app)
-        monkeypatch.setattr(cli, "_emit_audit_event", lambda *args, **kwargs: None)
-        monkeypatch.setattr(cli, "_emit_telemetry", lambda *args, **kwargs: None)
-        monkeypatch.setattr(sys, "argv", ["soup", "version"])
-
-        with pytest.raises(SystemExit):
-            cli.run()
+        seen = _values_seen_by_the_command(monkeypatch)
 
         assert seen == (["1"] if _WINDOWS else [None])
+
+    @windows_setting_only
+    @pytest.mark.parametrize("spelling", [_NO_CWD, _NO_CWD.lower()])
+    def test_a_value_already_set_is_kept(self, monkeypatch, spelling):
+        monkeypatch.setenv(spelling, "0")
+
+        seen = _values_seen_by_the_command(monkeypatch)
+
+        assert seen == ["0"]
+        assert os.environ[_NO_CWD] == "0"
+        assert len([name for name in os.environ if name.upper() == _NO_CWD.upper()]) == 1
 
     @windows_only
     def test_a_program_only_in_the_current_directory_is_not_started_by_bare_name(
