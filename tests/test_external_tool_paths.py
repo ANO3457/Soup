@@ -820,3 +820,105 @@ class TestTensorRT:
 
         assert "trtllm-build not found in PATH." in _plain(capsys.readouterr().out)
         assert run.argv0 == [sys.executable]
+
+
+class TestDocker:
+    def test_the_aider_preflight_runs_docker_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.eval import aider_polyglot
+
+        expected = tools("docker")
+        run = _Recorder(stdout="27.0.0\n")
+        monkeypatch.setattr(aider_polyglot.subprocess, "run", run)
+
+        docker = aider_polyglot.preflight_docker("aider-benchmark")
+
+        assert _same(docker, expected)
+        assert len(run.calls) == 2
+        assert all(_same(argv0, expected) for argv0 in run.argv0)
+
+    def test_a_docker_only_in_the_current_directory_is_not_used(self, tools, monkeypatch):
+        from soup_cli.eval import aider_polyglot
+
+        _program(tools.project, "docker")
+        run = _Recorder()
+        monkeypatch.setattr(aider_polyglot.subprocess, "run", run)
+
+        with pytest.raises(aider_polyglot.AiderEvalError, match="Docker CLI was not found"):
+            aider_polyglot.preflight_docker("aider-benchmark")
+        assert not run.calls
+
+
+class TestModal:
+    def _plan(self):
+        from soup_cli.cloud.modal import CloudPlan
+
+        return CloudPlan(
+            cloud="modal", gpu="a100", output_dir="./out",
+            stub_path="x.py", stub_text="", run_command="modal run x.py",
+        )
+
+    def test_modal_run_starts_the_absolute_cli(self, tools, monkeypatch):
+        from soup_cli.cloud.modal import submit_modal_run
+
+        expected = tools("modal")
+        monkeypatch.setitem(sys.modules, "modal", types.ModuleType("modal"))
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        rc = submit_modal_run(
+            self._plan(), env={"MODAL_TOKEN_ID": "id", "MODAL_TOKEN_SECRET": "secret"}
+        )
+
+        assert rc == 0
+        assert _same(run.argv0[0], expected)
+        assert run.calls[0][0][1:] == ["run", "x.py"]
+
+    def test_a_missing_modal_cli_is_refused_by_name(self, no_tools, monkeypatch):
+        from soup_cli.cloud.modal import submit_modal_run
+
+        monkeypatch.setitem(sys.modules, "modal", types.ModuleType("modal"))
+        run = _Recorder()
+        monkeypatch.setattr(subprocess, "run", run)
+
+        with pytest.raises(RuntimeError, match="Modal CLI `modal` was not found on PATH"):
+            submit_modal_run(
+                self._plan(), env={"MODAL_TOKEN_ID": "id", "MODAL_TOKEN_SECRET": "secret"}
+            )
+        assert not run.calls
+
+
+class TestGitHubCli:
+    def test_gh_runs_by_absolute_path(self, tools, monkeypatch):
+        from soup_cli.utils.adapter_pr import post_pr_comment
+
+        expected = tools("gh")
+        run = _Recorder(stdout='{"html_url": "u"}')
+
+        post_pr_comment("o/r#1", "body", env={"GITHUB_TOKEN": "t"}, runner=run)
+
+        assert _same(run.argv0[0], expected)
+
+    def test_a_missing_gh_keeps_its_message(self, no_tools):
+        from soup_cli.utils.adapter_pr import post_pr_comment
+
+        run = _Recorder()
+
+        with pytest.raises(RuntimeError, match="`gh` CLI not found"):
+            post_pr_comment("o/r#1", "body", env={"GITHUB_TOKEN": "t"}, runner=run)
+        assert not run.calls
+
+    def test_the_child_environment_keeps_the_program_search_variables(self, tools, monkeypatch):
+        from soup_cli.utils.adapter_pr import post_pr_comment
+
+        tools("gh")
+        _with_the_four(monkeypatch)
+        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "rel", str(tools.installed)]))
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+        run = _Recorder(stdout="{}")
+
+        post_pr_comment("o/r#1", "body", runner=run)
+
+        env = run.calls[0][1]["env"]
+        assert _folded(env) >= {name.upper() for name in _FOUR}
+        assert "OPENAI_API_KEY" not in _folded(env)
