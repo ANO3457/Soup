@@ -759,6 +759,41 @@ class TestLlamaCpp:
 
         assert _same(_find_quantize_binary(checkout), expected)
 
+    def test_export_returns_the_quantize_binary_of_a_dot_checkout_by_absolute_path(
+        self, no_tools, tmp_path
+    ):
+        from soup_cli.commands.export import _find_quantize_binary
+
+        expected = _program(tmp_path, "llama-quantize", suffix=".exe" if _WINDOWS else "")
+
+        found = _find_quantize_binary(Path("."))
+
+        assert os.path.isabs(found)
+        assert _same(found, expected)
+
+    @pytest.mark.parametrize("stage", ["quantize", "imatrix"])
+    def test_the_advanced_gguf_tools_of_a_dot_checkout_run_by_absolute_path(
+        self, no_tools, tmp_path, monkeypatch, stage
+    ):
+        from soup_cli.utils import gguf_quant
+
+        name = "llama-quantize" if stage == "quantize" else "llama-imatrix"
+        expected = _program(tmp_path, name, suffix=".exe" if _WINDOWS else "")
+        run = _Recorder()
+        monkeypatch.setattr(gguf_quant.subprocess, "run", run)
+
+        if stage == "quantize":
+            gguf_quant._run_quantize_binary(
+                llama_cpp_dir=".", f16_path="f16.gguf", output_path="out.gguf", flavour="Q4_K_M"
+            )
+        else:
+            gguf_quant._run_imatrix(
+                llama_cpp_dir=".", f16_path="f16.gguf", calib_data="c.txt", imatrix_out="i.dat"
+            )
+
+        assert os.path.isabs(run.argv0[0])
+        assert _same(run.argv0[0], expected)
+
     def test_export_clones_llama_cpp_with_the_absolute_git(self, tools, tmp_path, monkeypatch):
         from soup_cli.commands import export
 

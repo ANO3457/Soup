@@ -793,7 +793,10 @@ def _find_quantize_binary(llama_dir: Path) -> Optional[Path]:
         candidates.append(llama_dir / "build" / config / "llama-quantize.exe")
     for candidate in candidates:
         if candidate.exists():
-            return candidate
+            import os
+
+            # Absolute, so the binary runs from llama_dir even when it is ".".
+            return Path(os.path.abspath(candidate))
 
     # Check if it's in PATH
     from soup_cli.utils.tool_paths import find_tool
