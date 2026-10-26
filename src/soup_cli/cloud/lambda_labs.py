@@ -116,6 +116,8 @@ def _validate_remote_output(value: object) -> str:
     path = PurePosixPath(output)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError("Lambda output_dir must be a relative path without '..'")
+    if any(part.startswith("-") for part in path.parts):
+        raise ValueError("Lambda output_dir parts must not start with '-'")
     if not _REMOTE_OUTPUT_RE.fullmatch(output):
         raise ValueError(
             "Lambda output_dir may contain only letters, digits, '.', '_', '-', and '/'"
@@ -399,7 +401,8 @@ def render_lambda_stub(
         "    scp_backoff = 1",
         "    while True:",
         "        copied = subprocess.run(",
-        "            [scp, *common, '-r', source, str(destination)], check=False, env=env,",
+        "            [scp, *common, '-r', '--', source, str(destination)], check=False,",
+        "            env=env,",
         "        )",
         "        if copied.returncode == 0:",
         "            break",

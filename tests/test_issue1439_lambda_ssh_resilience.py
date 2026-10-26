@@ -141,6 +141,29 @@ def _run_controller(tmp_path: Path, monkeypatch, ssh_reply, scp_reply=None):
     return rc, seen, clock["now"]
 
 
+class TestLambdaCopyArguments:
+    def test_the_copy_names_its_source_and_destination_after_double_dash(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        stub, _ = _setup_controller_env(tmp_path, monkeypatch)
+        copies: list[list[str]] = []
+
+        def fake_run(argv, **kw):
+            if argv[0] == "scp":
+                copies.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "0\n", "")
+
+        rc, _ = _exec_controller(stub, fake_run)
+
+        assert rc == 0
+        assert len(copies) == 1
+        assert copies[0][-4:] == [
+            "-r", "--", "ubuntu@192.0.2.1:/home/ubuntu/soup/out", str(Path("./out").parent)
+        ]
+
+
 class TestLambdaSshResilience:
     def test_keepalive_options_present_in_stub(self) -> None:
         stub = render_lambda_stub(
