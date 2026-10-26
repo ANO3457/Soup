@@ -41,8 +41,8 @@ def find_tool(name: str, path: "str | None" = None) -> "str | None":
     empty and relative entries (``.``, ``bin``, and on Windows ``\\bin`` or
     ``C:bin``) are skipped, and the current directory is never searched. On
     Windows each PATHEXT extension is tried in turn (``.COM;.EXE;.BAT;.CMD``
-    when PATHEXT is unset), and a ``name`` that already ends in one is tried as
-    it is first; elsewhere the file must be executable. ``name`` is a bare
+    when PATHEXT is unset or names no extension), and a ``name`` that already
+    ends in one is tried as it is first; elsewhere the file must be executable. ``name`` is a bare
     program name: one with a directory part raises ``ValueError``.
     """
     if not name or os.path.basename(name) != name or name in (os.curdir, os.pardir):
@@ -51,8 +51,10 @@ def find_tool(name: str, path: "str | None" = None) -> "str | None":
         path = os.environ.get("PATH", os.defpath)
     windows = os.name == "nt"
     if windows:
-        pathext = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+        pathext = os.environ.get("PATHEXT", "")
         suffixes = [ext.strip() for ext in pathext.split(os.pathsep) if ext.strip()]
+        if not suffixes:
+            suffixes = [".COM", ".EXE", ".BAT", ".CMD"]
         if os.path.splitext(name)[1].upper() in {ext.upper() for ext in suffixes}:
             suffixes.insert(0, "")
     else:

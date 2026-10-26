@@ -257,6 +257,17 @@ class TestTheSearch:
         assert _same(find_tool("soup-probe-tool"), bat)
 
     @windows_only
+    @pytest.mark.parametrize("pathext", ["", ";", " ; "])
+    def test_a_pathext_that_names_no_extension_falls_back_to_the_default_extensions(
+        self, tmp_path, monkeypatch, pathext
+    ):
+        bat = _program(tmp_path / "bin", "soup-probe-tool", suffix=".BAT")
+        monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+        monkeypatch.setenv("PATHEXT", pathext)
+
+        assert _same(find_tool("soup-probe-tool"), bat)
+
+    @windows_only
     def test_a_name_that_ends_in_an_extension_is_tried_as_it_is(self, tmp_path, monkeypatch):
         cmd = _program(tmp_path / "bin", "soup-probe-tool", suffix=".cmd")
         monkeypatch.setenv("PATH", str(tmp_path / "bin"))
