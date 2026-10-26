@@ -104,7 +104,7 @@ soup train
   و`rl_checkpoint_include_rollout_buffer` بعد v0.76.0، فلم يحذّر منهما أي إصدار قبل ذلك. أما القيم فهي:
   `data.remove_unused_columns: true`، و`training.quantization: 4bit` / `8bit` (أو
   `load_in_8bit: true`) في مهمة لا تُكمِّم النموذج أبدًا، و`soup ab --beta`.
-  وتُرفَض أيضًا خمسة عشر إعدادًا كان v0.76 يتجاهلها دون أي كلمة، مثل `use_mod` أو `neftune_alpha` حيث
+  وتُرفَض أيضًا أربعة عشر إعدادًا كان v0.76 يتجاهلها دون أي كلمة، مثل `use_mod` أو `neftune_alpha` حيث
   لا يطبّقهما شيء، و`expand_layers` مع رتبة LoRA، و`8bit` أو SFT للرؤية على Unsloth، و`lora.rank_pattern`
   على MLX أو Unsloth: راجع ملاحظات الترقية في CHANGELOG.
 - **تغيير غير متوافق مع الإصدارات السابقة: Python 3.11–3.13، ولا تصدير بصيغتي AWQ أو GPTQ، ورمز مصادقة

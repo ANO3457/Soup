@@ -103,7 +103,7 @@ silently, can stop loading on v0.77: run `soup doctor --config soup.yaml` first.
   `rl_checkpoint_include_rollout_buffer` were staged after v0.76.0, so no release warned about
   them first. The values: `data.remove_unused_columns: true`, `training.quantization: 4bit` /
   `8bit` (or `load_in_8bit: true`) on a task that never quantises, and `soup ab --beta`.
-  Fifteen settings v0.76 ignored without a word are refused too, such as `use_mod` or
+  Fourteen settings v0.76 ignored without a word are refused too, such as `use_mod` or
   `neftune_alpha` where nothing applies them, `expand_layers` with a LoRA rank, `8bit` or vision
   SFT on Unsloth, and `lora.rank_pattern` on MLX or Unsloth: see the CHANGELOG upgrade notes.
 - **Breaking: Python 3.11–3.13, no AWQ or GPTQ export, a token for two `soup serve` routes.**

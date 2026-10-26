@@ -1388,7 +1388,7 @@ You can also explicitly disable telemetry for a specific invocation using the `-
 soup --no-telemetry train --config soup.yaml
 ```
 
-When enabled, telemetry performs a synchronous fire-and-forget HTTP POST with a 1-second connect and read timeout (DNS resolution excluded) on command exit. The anonymous identifier is stored at `~/.soup/telemetry_id`; deleting `~/.soup/telemetry_id` regenerates it on the next opt-in. See [Privacy Policy](#privacy-policy) for details.
+As released, opting in sends nothing: the bundled PostHog key is a placeholder, so the command prints `Notice: telemetry is not yet live.` and makes no network request. Only with an operator's own `SOUP_POSTHOG_KEY` (and optionally an HTTPS `SOUP_POSTHOG_ENDPOINT`) does telemetry perform a synchronous fire-and-forget HTTPS POST with a 1-second connect and read timeout (DNS resolution excluded) on command exit. The anonymous identifier is stored at `~/.soup/telemetry_id`; deleting `~/.soup/telemetry_id` regenerates it on the next opt-in. See [Privacy Policy](#privacy-policy) for details.
 
 
 ## Profiling Extras
@@ -1643,7 +1643,7 @@ Soup contains opt-in, hardware-info-only telemetry in `utils/trackers.py` (`buil
 
 ### Privacy Policy
 
-Soup's telemetry is strictly anonymous and hardware-focused. When opted in via `SOUP_TELEMETRY=1`, we collect only the following fields to understand what environments we need to support:
+Soup's telemetry is strictly anonymous and hardware-focused. When opted in via `SOUP_TELEMETRY=1`, the payload carries only the following fields to understand what environments we need to support (it is sent only with an operator's own `SOUP_POSTHOG_KEY`, see below):
 
 - `soup_version`: the version of Soup being run
 - `command`: the top-level command executed (e.g. `train`, `data`, validated against known commands; unknown commands or paths are masked as `(unknown)`)
@@ -1658,9 +1658,9 @@ We **NEVER** collect:
 - Model names or architectures
 - Config file contents or hyperparameters
 - Usernames, local file paths, or directory names
-- IP addresses, tokens, or credentials
+- IP addresses (the payload carries none; the receiving server sees the client address of any HTTPS request), tokens, or credentials
 
-All uploads use HTTPS, a 1-second connect and read timeout (DNS resolution excluded), and defensive SSRF validation. Any network or filesystem exception is silently swallowed so telemetry can never fail or interrupt your work.
+With the bundled placeholder key nothing is uploaded: an opted-in command prints `Notice: telemetry is not yet live.` and makes no request. With an operator's own `SOUP_POSTHOG_KEY`, uploads use HTTPS, a 1-second connect and read timeout (DNS resolution excluded), and defensive SSRF validation. Any network or filesystem exception is silently swallowed so telemetry can never fail or interrupt your work.
 
 
 ## Plugin System

@@ -102,7 +102,7 @@ NF4 达到 **952 MHz 下 119.6 tok/s，峰值 3.32 GB**（修复前）——与�
   之后才被暂存的，因此此前没有任何版本对它们发出过警告。取值包括：`data.remove_unused_columns: true`、
   在从不量化的任务上设置 `training.quantization: 4bit` / `8bit`（或 `load_in_8bit: true`），以及
   `soup ab --beta`。
-  v0.76 不声不响地忽略的十五个设置也会被拒绝，例如在没有任何代码应用它们的地方设置的 `use_mod` 或
+  v0.76 不声不响地忽略的十四个设置也会被拒绝，例如在没有任何代码应用它们的地方设置的 `use_mod` 或
   `neftune_alpha`、带 LoRA 秩的 `expand_layers`、Unsloth 上的 `8bit` 或视觉 SFT，以及 MLX 或 Unsloth 上的
   `lora.rank_pattern`：详见 CHANGELOG 中的升级说明。
 - **破坏性变更：Python 3.11–3.13，不再支持 AWQ 和 GPTQ 导出，`soup serve` 的两个路由需要令牌。** 不再

@@ -104,7 +104,7 @@ v0.77 では読み込めなくなることがあります。まず `soup doctor 
   `rl_checkpoint_include_rollout_buffer` は v0.76.0 より後にステージされたため、事前に警告した
   リリースはありません。値は、`data.remove_unused_columns: true`、量子化を一切行わないタスクでの
   `training.quantization: 4bit` / `8bit`（または `load_in_8bit: true`）、そして `soup ab --beta` です。
-  v0.76 が何も言わずに無視していた十五個の設定も拒否されます。たとえば何も適用しない場所での `use_mod` や
+  v0.76 が何も言わずに無視していた十四個の設定も拒否されます。たとえば何も適用しない場所での `use_mod` や
   `neftune_alpha`、LoRA ランク付きの `expand_layers`、Unsloth での `8bit` やビジョン SFT、MLX または
   Unsloth での `lora.rank_pattern` です。CHANGELOG のアップグレードノートを参照してください。
 - **破壊的変更: Python 3.11–3.13、AWQ と GPTQ のエクスポートは廃止、`soup serve` の二つのルートに
