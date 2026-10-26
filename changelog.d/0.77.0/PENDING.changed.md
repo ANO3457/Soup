@@ -1,0 +1,5 @@
+- On Windows a program that is only in the current directory is no longer started by bare name,
+  by `soup` or by the programs it starts (eval and reward scripts included), so that the program
+  that runs is the one on `PATH`: `soup` sets `NoDefaultCurrentDirectoryInExePath=1` for itself
+  when it is not set. Put the program's directory on `PATH` as an absolute path, or give the
+  program's path. (#PENDING)
