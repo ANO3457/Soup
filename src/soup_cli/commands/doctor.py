@@ -637,7 +637,7 @@ def _check_gpu():
                     title="GPU",
                 )
             )
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        elif hasattr(getattr(torch, "backends", None), "mps") and torch.backends.mps.is_available():
             from soup_cli.utils.terminal import for_terminal
 
             async_load = os.environ.get("HF_DEACTIVATE_ASYNC_LOAD")

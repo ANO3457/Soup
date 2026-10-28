@@ -1152,8 +1152,10 @@ def test_doctor_gpu_hidden_by_cuda_visible_devices_minus_one(monkeypatch):
     import importlib.machinery
     import types
 
+    _mock_clean_doctor_env(monkeypatch)
     fake_torch = types.SimpleNamespace(
         __spec__=importlib.machinery.ModuleSpec("torch", None),
+        backends=types.SimpleNamespace(),
         cuda=types.SimpleNamespace(is_available=lambda: False),
         version=types.SimpleNamespace(cuda="13.0"),
     )
@@ -1188,8 +1190,10 @@ def test_doctor_gpu_failed_cuda_init_without_cuda_visible_devices_advises_reinst
     import importlib.machinery
     import types
 
+    _mock_clean_doctor_env(monkeypatch)
     fake_torch = types.SimpleNamespace(
         __spec__=importlib.machinery.ModuleSpec("torch", None),
+        backends=types.SimpleNamespace(),
         cuda=types.SimpleNamespace(is_available=lambda: False),
         version=types.SimpleNamespace(cuda="13.0"),
     )
