@@ -275,6 +275,7 @@ def test_detect_gpu_hw_distinguishes_cuda_build_from_cpu_build(monkeypatch):
         "importlib.metadata.version",
         lambda name: "2.14.0+cu130",
     )
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     advisory = _detect_gpu_hw_without_torch_cuda()
 
@@ -283,6 +284,42 @@ def test_detect_gpu_hw_distinguishes_cuda_build_from_cpu_build(monkeypatch):
     assert "--force-reinstall" in advisory
     assert "torch>=2.6.0" in advisory
     assert "whl/cu130" in advisory
+
+
+def test_detect_gpu_hw_reports_cuda_visible_devices_minus_one(monkeypatch):
+    import sys
+    import types
+
+    from soup_cli.commands.doctor import _detect_gpu_hw_without_torch_cuda
+
+    fake_torch = types.SimpleNamespace(
+        version=types.SimpleNamespace(cuda="13.0"),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_cuda_version",
+        lambda: (13, 0),
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_executable",
+        lambda: "/usr/bin/nvidia-smi",
+    )
+    completed = types.SimpleNamespace(
+        returncode=0,
+        stdout="NVIDIA GeForce RTX 5070 Laptop GPU\n",
+        stderr="",
+    )
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr(
+        "importlib.metadata.version",
+        lambda name: "2.14.0+cu130",
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
+
+    advisory = _detect_gpu_hw_without_torch_cuda()
+
+    assert "CUDA_VISIBLE_DEVICES" in advisory
+    assert "--force-reinstall" not in advisory
 
 
 def test_torch_cuda_wheel_tag_picks_supported_index():

@@ -1147,6 +1147,75 @@ def test_doctor_without_config_unchanged(monkeypatch):
     assert "All checks passed!" in out
 
 
+def test_doctor_gpu_hidden_by_cuda_visible_devices_minus_one(monkeypatch):
+    """CUDA_VISIBLE_DEVICES=-1 is reported without advising --force-reinstall (#2191)."""
+    import importlib.machinery
+    import types
+
+    fake_torch = types.SimpleNamespace(
+        __spec__=importlib.machinery.ModuleSpec("torch", None),
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        version=types.SimpleNamespace(cuda="13.0"),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_cuda_version",
+        lambda: (13, 0),
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_executable",
+        lambda: "/usr/bin/nvidia-smi",
+    )
+    completed = types.SimpleNamespace(
+        returncode=0,
+        stdout="NVIDIA GeForce RTX 5070 Laptop GPU\n",
+        stderr="",
+    )
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: completed)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    out = _plain(result.output)
+    assert "CUDA_VISIBLE_DEVICES" in out
+    assert "--force-reinstall" not in out
+
+
+def test_doctor_gpu_failed_cuda_init_without_cuda_visible_devices_advises_reinstall(
+    monkeypatch,
+):
+    """Control test: with CUDA_VISIBLE_DEVICES unset, failed CUDA init advises reinstall (#2191)."""
+    import importlib.machinery
+    import types
+
+    fake_torch = types.SimpleNamespace(
+        __spec__=importlib.machinery.ModuleSpec("torch", None),
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        version=types.SimpleNamespace(cuda="13.0"),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_cuda_version",
+        lambda: (13, 0),
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.doctor._nvidia_smi_executable",
+        lambda: "/usr/bin/nvidia-smi",
+    )
+    completed = types.SimpleNamespace(
+        returncode=0,
+        stdout="NVIDIA GeForce RTX 5070 Laptop GPU\n",
+        stderr="",
+    )
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: completed)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    out = _plain(result.output)
+    assert "--force-reinstall" in out
+
+
 def test_doctor_nonexistent_config_exits_2(tmp_path, monkeypatch):
     """A nonexistent config path prints 'Config not found' and exits 2 (#2100)."""
     _mock_clean_doctor_env(monkeypatch)

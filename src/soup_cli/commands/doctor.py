@@ -810,6 +810,13 @@ def _detect_gpu_hw_without_torch_cuda() -> str:
     except Exception:  # noqa: BLE001
         torch_version = "?"
 
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() == "-1":
+        return (
+            f"GPU hardware present ({gpu_label}) but CUDA_VISIBLE_DEVICES=-1 "
+            f"hides the GPU from torch (torch {torch_version}). "
+            "Unset CUDA_VISIBLE_DEVICES to use the GPU."
+        )
+
     try:
         import torch
 
